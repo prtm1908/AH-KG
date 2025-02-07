@@ -436,7 +436,16 @@ def consolidate_and_lemmatize_triplets(triplets):
     # Remove any duplicates that might have been created during consolidation
     return remove_duplicate_triplets(consolidated_triplets)
 
-def main():
+def process_text_file(file_path: str):
+    """
+    Process a text file to generate a knowledge graph.
+    
+    Args:
+        file_path (str): Path to the text file to process
+        
+    Returns:
+        list: List of triplets extracted from the text
+    """
     # Initialize models
     model = fastcoref.FCoref()
     properties = {
@@ -445,7 +454,7 @@ def main():
     }
 
     # Read original text
-    with open('../textFiles/text1.txt', encoding='utf8') as f:
+    with open(file_path, encoding='utf8') as f:
         text = f.read()
 
     # Split text into sentences (simple split by period for now)
@@ -504,21 +513,12 @@ def main():
         for triple in final_triplets:
             print('|-', triple)
 
-        # Create and visualize knowledge graph
-        kg = OpenIEKnowledgeGraph()
-        kg.clear_graph()
-        kg.build_knowledge_graph(final_triplets)
-        
-        # Get and print statistics
-        stats = kg.get_graph_statistics()
-        print("\nGraph Statistics:")
-        print(f"Number of nodes: {stats['node_count']}")
-        print(f"Number of relationships: {stats['relationship_count']}")
-        print("Relationship types:", ", ".join(stats['relationship_types']))
-        
-        # Visualize and save the graph
-        kg.visualize_graph()
-        print('Graph generated: graphCoref.png')
+        # Return the final triplets
+        return final_triplets
+
+def main():
+    # Example usage with default text file
+    process_text_file('../textFiles/text1.txt')
 
 if __name__ == '__main__':
     main()
