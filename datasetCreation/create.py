@@ -74,82 +74,121 @@ def format_triplets(triplets: list) -> str:
     """Format triplets as a string with newline separation."""
     formatted = []
     for t in triplets:
-        formatted.append(f"{t['subject']} | {t['relation']} | {t['object']} | {t['strength']}")
+        formatted.append(f"{t['subject']} -> {t['relation']} -> {t['object']} | {t['strength']}")
     return "\n".join(formatted)
 
 def main():
     try:
-        # Start CoreNLP server
+        # Start CoreNLP server once at the beginning
         logger.info("Starting CoreNLP server...")
         server_process = start_corenlp_server()
         
-        # Read the dataset
-        logger.info("Reading QA dataset...")
-        original_df = pd.read_csv('QA_dataset.csv')
-        
-        # Select 100 random rows
-        logger.info("Selecting 100 random rows...")
-        if len(original_df) > 100:
-            original_df = original_df.sample(n=100, random_state=42)
-        
-        # Create a new DataFrame for triplets
-        triplets_df = pd.DataFrame(index=original_df.index)
-        triplets_df['knowledge_graph_triplets'] = ''
-        triplets_df['question1_triplets'] = ''
-        triplets_df['question2_triplets'] = ''
-        triplets_df['question3_triplets'] = ''
-        
-        # Create output directory if it doesn't exist
-        output_dir = 'processed_rows'
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Process each row
-        for idx, row in original_df.iterrows():
-            logger.info(f"Processing row {idx + 1}/{len(original_df)}...")
+        try:
+            # Check if there's an existing progress file
+            if os.path.exists('QA_dataset_with_triplets.csv'):
+                logger.info("Found existing progress, loading it...")
+                df = pd.read_csv('QA_dataset_with_triplets.csv')
+                
+                # Find rows that haven't been processed yet (empty knowledge graph triplets)
+                unprocessed_mask = df['knowledge_graph_triplets'].isna() | (df['knowledge_graph_triplets'] == '')
+                unprocessed_rows = df[unprocessed_mask]
+                
+                logger.info(f"Found {len(unprocessed_rows)} unprocessed rows out of {len(df)} total rows")
+                
+                if len(unprocessed_rows) == 0:
+                    logger.info("All rows have been processed already!")
+                    return
+                
+                # Process each unprocessed row
+                for idx in unprocessed_rows.index:
+                    logger.info(f"Processing row {idx + 1}/{len(df)}...")
+                    
+                    try:
+                        row = df.loc[idx]
+                        # Process paragraph to get knowledge graph triplets
+                        paragraph_triplets = process_paragraph_to_triplets(row['Paragraphs'], server_process)
+                        df.at[idx, 'knowledge_graph_triplets'] = format_triplets(paragraph_triplets)
+                        
+                        # Create knowledge graph for the paragraph
+                        kg = OpenIEKnowledgeGraph()
+                        process_text_to_kg(row['Paragraphs'], kg)
+                        
+                        # Get relevant triplets for each question
+                        for i in range(1, 4):
+                            question = row[f'Question{i}']
+                            relevant_triplets = get_relevant_triplets_for_question(kg, question)
+                            df.at[idx, f'question{i}_triplets'] = format_triplets(relevant_triplets)
+                        
+                        # Save progress after each row
+                        df.to_csv('QA_dataset_with_triplets.csv', index=False)
+                        logger.info(f"Processed row {idx}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing row {idx}: {str(e)}")
+                        continue
+                
+            else:
+                # If no existing file, create new one with 100 random rows
+                logger.info("No existing progress file found. Creating new one...")
+                
+                # Read the original dataset
+                logger.info("Reading QA dataset...")
+                original_df = pd.read_csv('QA_dataset.csv')
+                
+                # Select 100 random rows
+                logger.info("Selecting 100 random rows...")
+                if len(original_df) > 100:
+                    df = original_df.sample(n=100)
+                else:
+                    df = original_df
+                
+                # Add empty columns for triplets
+                df['knowledge_graph_triplets'] = ''
+                df['question1_triplets'] = ''
+                df['question2_triplets'] = ''
+                df['question3_triplets'] = ''
+                
+                # Save the initial file
+                df.to_csv('QA_dataset_with_triplets.csv', index=False)
+                
+                # Process each row
+                for idx in df.index:
+                    logger.info(f"Processing row {idx + 1}/{len(df)}...")
+                    
+                    try:
+                        row = df.loc[idx]
+                        # Process paragraph to get knowledge graph triplets
+                        paragraph_triplets = process_paragraph_to_triplets(row['Paragraphs'], server_process)
+                        df.at[idx, 'knowledge_graph_triplets'] = format_triplets(paragraph_triplets)
+                        
+                        # Create knowledge graph for the paragraph
+                        kg = OpenIEKnowledgeGraph()
+                        process_text_to_kg(row['Paragraphs'], kg)
+                        
+                        # Get relevant triplets for each question
+                        for i in range(1, 4):
+                            question = row[f'Question{i}']
+                            relevant_triplets = get_relevant_triplets_for_question(kg, question)
+                            df.at[idx, f'question{i}_triplets'] = format_triplets(relevant_triplets)
+                        
+                        # Save progress after each row
+                        df.to_csv('QA_dataset_with_triplets.csv', index=False)
+                        logger.info(f"Processed row {idx}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing row {idx}: {str(e)}")
+                        continue
             
-            try:
-                # Process paragraph to get knowledge graph triplets
-                paragraph_triplets = process_paragraph_to_triplets(row['Paragraphs'], server_process)
-                triplets_df.at[idx, 'knowledge_graph_triplets'] = format_triplets(paragraph_triplets)
-                
-                # Create knowledge graph for the paragraph
-                kg = OpenIEKnowledgeGraph()
-                process_text_to_kg(row['Paragraphs'], kg)
-                
-                # Get relevant triplets for each question
-                for i in range(1, 4):
-                    question = row[f'Question{i}']
-                    relevant_triplets = get_relevant_triplets_for_question(kg, question)
-                    triplets_df.at[idx, f'question{i}_triplets'] = format_triplets(relevant_triplets)
-                
-                # Save progress after each row
-                current_result = pd.concat([
-                    original_df.iloc[:idx+1],
-                    triplets_df.iloc[:idx+1]
-                ], axis=1)
-                
-                # Save to both a temporary file and the final file
-                temp_output_path = os.path.join(output_dir, f'row_{idx+1}_processed.csv')
-                final_output_path = 'QA_dataset_with_triplets.csv'
-                
-                current_result.to_csv(temp_output_path, index=False)
-                current_result.to_csv(final_output_path, index=False)
-                
-                logger.info(f"Saved progress to {temp_output_path}")
-                
-            except Exception as e:
-                logger.error(f"Error processing row {idx}: {str(e)}")
-                continue
-        
-        logger.info("Processing completed!")
-        
+            logger.info("Processing completed!")
+            
+        finally:
+            # Stop CoreNLP server in the inner try-finally to ensure it's stopped even if processing fails
+            logger.info("Stopping CoreNLP server...")
+            server_process.terminate()
+            server_process.wait()
+            
     except Exception as e:
         logger.error(f"Error in main process: {str(e)}")
-    finally:
-        # Stop CoreNLP server
-        logger.info("Stopping CoreNLP server...")
-        server_process.terminate()
-        server_process.wait()
 
 if __name__ == "__main__":
     main()
