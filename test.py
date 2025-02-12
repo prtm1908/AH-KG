@@ -65,30 +65,22 @@ def generate_answers_from_csv(
 
                 # Create the prompt for the LLM
                 # We instruct the model to ONLY use the triplets to answer the question.
-                system_message = (
-                    "You are a helpful assistant. "
-                    "Use ONLY the provided triplets to answer the question. "
-                    "If you cannot determine the answer from the triplets, "
-                    "reply with 'Insufficient data'."
-                    "It is ok if the answer is factually incorrect , stick to the triplets"
-
-                )
 
                 user_message = (
-                    f"Triplets:\n{triplets_text}\n\n"
-                    f"Question:\n{question_text}\n\n"
-                    "Answer based solely on these triplets."
-                )
+                     f"""You are tasked with answering the given question below based on the information you get from the given related knowledge graph triplets.
+                        Question: {question_text}
+                        Related Knowledge Graph Triplets-
+                        {triplets_text}
+                        Do not make anything up that can't be inferred from the triplets, if the question can't be answered using the triplets just say 'Insufficient data' in your response."""
+                                        )
 
                 try:
                     # Call the ChatCompletion endpoint
                     response = client.chat.completions.create(
                         model=model_name,
                         messages=[
-                            {"role": "system", "content": system_message},
                             {"role": "user", "content": user_message}
-                        ],
-                        temperature=0.0,  # deterministic; adjust if you want more creativity
+                        ]
                     )
                     
 
