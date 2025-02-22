@@ -1,118 +1,140 @@
 import nltk
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import wordnet
 from lemminflect import getInflection
-from collections import Counter
 
-# Download required NLTK data if not already available.
+# Ensure the required NLTK resources are downloaded.
 nltk.download('averaged_perceptron_tagger')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
-def annotate_triplets(triplets):
+def penn_to_wordnet(tag):
     """
-    Given a list of knowledge graph triplets as tuples (subject, relationship, object),
-    this function:
-      1. Counts duplicate triplets to determine strength.
-      2. Tokenizes each element and obtains Penn-Treebank tags.
-      3. Delemmatizes each token using getInflection.
-      4. Stores the POS tag, original lemma, and strength in metadata.
-    
-    Returns a list of dictionaries with keys: 'subject', 'relationship', 'object', 'metadata'.
+    Convert a Penn Treebank POS tag to a WordNet POS tag.
     """
-    # Count frequency of each triplet to determine strength.
-    triplet_freq = Counter(triplets)
-    annotated = []
+    if tag.startswith('J'):
+        return wordnet.ADJ
+    elif tag.startswith('V'):
+        return wordnet.VERB
+    elif tag.startswith('N'):
+        return wordnet.NOUN
+    elif tag.startswith('R'):
+        return wordnet.ADV
+    else:
+        return wordnet.NOUN
+
+def lemmatize_triplets(raw_triplets):
+    """
+    Process raw knowledge graph triplets (non-lemmatized) and convert each element into its lemma.
     
-    for subj, rel, obj in triplets:
-        strength = triplet_freq[(subj, rel, obj)]
+    For each element (subject, relationship, object):
+      - Tokenize the string.
+      - Convert tokens to lowercase before lemmatizing.
+      - Retrieve Penn-Treebank POS tags.
+      - Lemmatize each token using WordNetLemmatizer.
+      - Join tokens back into a lemmatized string.
+      - Store the representative (first token's) Penn-Treebank tag and the original raw text in a metadata field.
+    
+    Returns a list of dictionaries with keys: 'subject', 'relationship', 'object', and 'metadata'.
+    """
+    lemmatizer = WordNetLemmatizer()
+    processed = []
+    
+    for subj_raw, rel_raw, obj_raw in raw_triplets:
+        # Tokenize and convert tokens to lowercase for proper lemmatization.
+        subj_tokens = subj_raw.split()
+        subj_tokens_lower = [token.lower() for token in subj_tokens]
+        rel_tokens = rel_raw.split()
+        rel_tokens_lower = [token.lower() for token in rel_tokens]
+        obj_tokens = obj_raw.split()
+        obj_tokens_lower = [token.lower() for token in obj_tokens]
         
-        # Tokenize each element (here using a simple whitespace split)
-        subj_tokens = subj.split()
-        rel_tokens  = rel.split()
-        obj_tokens  = obj.split()
+        # Get POS tags for the lowercase tokens.
+        subj_pos = nltk.pos_tag(subj_tokens_lower)
+        rel_pos  = nltk.pos_tag(rel_tokens_lower)
+        obj_pos  = nltk.pos_tag(obj_tokens_lower)
         
-        # Get a representative tag (using the first token's tag) for each element.
-        subj_tag = nltk.pos_tag([subj_tokens[0]])[0][1] if subj_tokens else ''
-        rel_tag  = nltk.pos_tag([rel_tokens[0]])[0][1] if rel_tokens else ''
-        obj_tag  = nltk.pos_tag([obj_tokens[0]])[0][1] if obj_tokens else ''
+        # Use the first token's tag as the representative tag.
+        subj_tag = subj_pos[0][1] if subj_pos else ''
+        rel_tag  = rel_pos[0][1] if rel_pos else ''
+        obj_tag  = obj_pos[0][1] if obj_pos else ''
         
-        def inflect_tokens(tokens):
-            inflected = []
-            for token in tokens:
-                token_tag = nltk.pos_tag([token])[0][1]
-                # Get inflected forms using getInflection
-                infls = getInflection(token, token_tag, inflect_oov=True)
-                # Use the first candidate if available
-                inflected_token = infls[0] if infls else token
-                inflected.append(inflected_token)
-            return " ".join(inflected)
+        def lemmatize_tokens(pos_tags):
+            lemmas = []
+            for token, pos in pos_tags:
+                wn_pos = penn_to_wordnet(pos)
+                lemma = lemmatizer.lemmatize(token, pos=wn_pos)
+                lemmas.append(lemma)
+            return " ".join(lemmas)
         
-        inflected_subj = inflect_tokens(subj_tokens)
-        inflected_rel  = inflect_tokens(rel_tokens)
-        inflected_obj  = inflect_tokens(obj_tokens)
+        subj_lemma = lemmatize_tokens(subj_pos)
+        rel_lemma  = lemmatize_tokens(rel_pos)
+        obj_lemma  = lemmatize_tokens(obj_pos)
         
-        annotated.append({
-            "subject": inflected_subj,
-            "relationship": inflected_rel,
-            "object": inflected_obj,
+        processed.append({
+            "subject": subj_lemma,
+            "relationship": rel_lemma,
+            "object": obj_lemma,
             "metadata": {
                 "subject_tag": subj_tag,
                 "relationship_tag": rel_tag,
                 "object_tag": obj_tag,
-                "subject_lemma": subj,
-                "relationship_lemma": rel,
-                "object_lemma": obj,
-                "strength": strength  # strength is the number of times this triplet appears
+                "subject_raw": subj_raw,
+                "relationship_raw": rel_raw,
+                "object_raw": obj_raw
             }
         })
         
-    return annotated
+    return processed
 
-def update_subject_inflection(triplets_with_metadata):
+def de_lemmatize_triplets(triplets_with_metadata):
     """
-    Given annotated triplets (as produced by annotate_triplets),
-    this function re-inflects the subject using the stored original subject lemma
-    and its corresponding POS tag.
+    Given triplets that have been lemmatized and annotated with metadata, 
+    de-lemmatize (i.e. re-inflect) the subject using lemminflect's getInflection function.
     
-    It calls getInflection on the subject (as a whole) and updates the triple’s subject.
+    For each triplet:
+      - Retrieve the lemmatized subject (which is now in its base form) and its stored Penn-Treebank tag.
+      - Call getInflection on the base form to obtain the inflected version.
+      - Update the subject with the returned candidate (if available).
+    
     Returns the updated list of triplets.
     """
-    updated_triples = []
+    updated_triplets = []
     
     for trip in triplets_with_metadata:
         meta = trip.get("metadata", {})
-        # Retrieve the original subject lemma and its tag.
-        subj_lemma = meta.get("subject_lemma", trip["subject"])
-        subj_tag   = meta.get("subject_tag")
+        subj_lemma = trip.get("subject", "")
+        subj_tag = meta.get("subject_tag", "")
         
         if subj_tag:
-            # Inflect the whole subject using the original lemma and tag.
-            infls = getInflection(subj_lemma, subj_tag, inflect_oov=True)
-            new_subj = infls[0] if infls else trip["subject"]
+            # getInflection expects a base form; it returns a tuple of candidate inflections.
+            infl_candidates = getInflection(subj_lemma, subj_tag, inflect_oov=True)
+            new_subject = infl_candidates[0] if infl_candidates else subj_lemma
         else:
-            new_subj = trip["subject"]
+            new_subject = subj_lemma
         
-        # Create a copy of the triple with the updated subject.
         updated_trip = trip.copy()
-        updated_trip["subject"] = new_subj
-        updated_triples.append(updated_trip)
-        
-    return updated_triples
+        updated_trip["subject"] = new_subject
+        updated_triplets.append(updated_trip)
+    
+    return updated_triplets
 
-# --- Example usage ---
+# --- Example Usage ---
 if __name__ == "__main__":
-    # Example list of triplets in lemma form. The first triplet is repeated to demonstrate strength.
-    triplets = [
-        ("run", "be_part_of", "marathon"),
-        ("jump", "lead_to", "success"),
-        ("run", "be_part_of", "marathon")  # duplicate, strength should be 2
+    # Raw triplets (non-lemmatized) as input.
+    raw_triplets = [
+        ("Running", "is part of", "a marathon"),
+        ("Jumped", "leads to", "success"),
     ]
     
-    # Annotate triplets with POS tags, delemmatized forms, and strength metadata.
-    annotated = annotate_triplets(triplets)
-    print("Annotated Triplets:")
-    for item in annotated:
-        print(item)
+    # First, lemmatize the raw triplets and store metadata.
+    lemmatized = lemmatize_triplets(raw_triplets)
+    print("Lemmatized Triplets with Metadata:")
+    for t in lemmatized:
+        print(t)
     
-    # Update subject inflection based on metadata.
-    updated = update_subject_inflection(annotated)
-    print("\nUpdated Triplets (subject inflected):")
-    for item in updated:
-        print(item)
+    # Next, de-lemmatize (inflect) the subject using the inflection function.
+    de_lemmatized = de_lemmatize_triplets(lemmatized)
+    print("\nTriplets after De-lemmatizing the Subject:")
+    for t in de_lemmatized:
+        print(t)
