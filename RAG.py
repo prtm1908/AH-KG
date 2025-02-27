@@ -1,7 +1,7 @@
 import subprocess
 import os
 import networkx as nx
-from OpenIE.knowledge_graph import OpenIEKnowledgeGraph, process_text_file
+from knowledge_graph import OpenIEKnowledgeGraph, process_text_file
 import tempfile
 import logging
 import spacy
