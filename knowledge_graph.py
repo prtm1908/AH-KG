@@ -518,7 +518,7 @@ def process_text_file(file_path: str):
 
 def main():
     # Example usage with default text file
-    process_text_file('../textFiles/text1.txt')
+    process_text_file('textFiles/text1.txt')
 
 if __name__ == '__main__':
     main()
