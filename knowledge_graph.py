@@ -407,7 +407,7 @@ def lemmatize_entity(text):
     """Lemmatize each word in the entity text."""
     nlp = spacy.load("en_core_web_sm")
     doc = nlp(text)
-    return ' '.join([token.lemma_ for token in doc])
+    return ' '.join([token.lemma_ for token in doc]), [token.text for token in doc]
 
 def consolidate_and_lemmatize_triplets(triplets):
     """Consolidate similar entities and relations, then lemmatize all entities in triplets."""
@@ -419,9 +419,15 @@ def consolidate_and_lemmatize_triplets(triplets):
     for triplet in triplets:
         new_triplet = triplet.copy()
         
+        # Store the original unconsolidated and unlemmatized forms
+        new_triplet['original_subject'] = triplet['subject']
+        new_triplet['original_object'] = triplet['object']
+        
         # Apply consolidation for subject
         subject = entity_mapping.get(triplet['subject'], triplet['subject'])
-        new_triplet['subject'] = lemmatize_entity(subject)
+        subject_lemmatized, subject_originals = lemmatize_entity(subject)
+        new_triplet['subject'] = subject_lemmatized
+        new_triplet['subject_original_forms'] = subject_originals
         
         # Apply consolidation for relation
         relation = relation_mapping.get(triplet['relation'], triplet['relation'])
@@ -429,12 +435,55 @@ def consolidate_and_lemmatize_triplets(triplets):
         
         # Apply consolidation for object
         obj = entity_mapping.get(triplet['object'], triplet['object'])
-        new_triplet['object'] = lemmatize_entity(obj)
+        obj_lemmatized, obj_originals = lemmatize_entity(obj)
+        new_triplet['object'] = obj_lemmatized
+        new_triplet['object_original_forms'] = obj_originals
         
         consolidated_triplets.append(new_triplet)
     
     # Remove any duplicates that might have been created during consolidation
-    return remove_duplicate_triplets(consolidated_triplets)
+    # But preserve the original forms when removing duplicates
+    unique_triplets = []
+    seen_combinations = set()
+    
+    for t in consolidated_triplets:
+        # Create a key for the lemmatized form
+        key = (t['subject'], t['relation'], t['object'])
+        
+        if key not in seen_combinations:
+            seen_combinations.add(key)
+            unique_triplets.append(t)
+        else:
+            # If we've seen this combination before, merge the original forms
+            for existing in unique_triplets:
+                if (existing['subject'], existing['relation'], existing['object']) == key:
+                    # Add the original unconsolidated forms to the list
+                    if 'all_original_forms' not in existing:
+                        existing['all_original_forms'] = {
+                            'subjects': [existing['original_subject']],
+                            'objects': [existing['original_object']]
+                        }
+                    existing['all_original_forms']['subjects'].append(t['original_subject'])
+                    existing['all_original_forms']['objects'].append(t['original_object'])
+                    break
+    
+    return unique_triplets
+
+def delemmatize_triplets(triplets):
+    """Convert lemmatized triplets back to their original forms using tracked original forms."""
+    delemmatized_triplets = []
+    
+    for triplet in triplets:
+        # Create new triplet with original forms
+        new_triplet = {
+            'subject': triplet['original_subject'],
+            'relation': triplet['relation'],  # Relations weren't lemmatized
+            'object': triplet['original_object'],
+            'strength': triplet.get('strength', 1.0)
+        }
+        delemmatized_triplets.append(new_triplet)
+    
+    return delemmatized_triplets
 
 def process_text_file(file_path: str):
     """
@@ -502,14 +551,27 @@ def process_text_file(file_path: str):
         
         # Consolidate similar entities and lemmatize
         print('\nConsolidating similar entities and lemmatizing...')
-        final_triplets = consolidate_and_lemmatize_triplets(deduped_triplets)
+        lemmatized_triplets = consolidate_and_lemmatize_triplets(deduped_triplets)
+        
+        print('\nLemmatized triplets after duplicate removal:')
+        for triple in lemmatized_triplets:
+            print('|-', {
+                'subject': triple['subject'],
+                'relation': triple['relation'],
+                'object': triple['object'],
+                'strength': triple.get('strength', 1.0)
+            })
+        
+        # Convert back to original forms
+        print('\nConverting back to original forms...')
+        final_triplets = delemmatize_triplets(lemmatized_triplets)
         
         # Add default strength to each triplet
         for triplet in final_triplets:
             triplet['strength'] = 1.0
 
         print('\nOriginal Text:', text)
-        print('\nAll resolved relations:')
+        print('\nFinal delemmatized triplets:')
         for triple in final_triplets:
             print('|-', triple)
 
