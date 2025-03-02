@@ -13,7 +13,8 @@ from RAG import (
     extract_query_entities,
     find_matching_nodes,
     extract_relevant_triplets_from_entities,
-    OpenIEKnowledgeGraph
+    OpenIEKnowledgeGraph,
+    get_nodes_at_depth_two
 )
 
 import logging
@@ -36,11 +37,14 @@ def process_paragraph_to_triplets(text: str, server_process) -> list:
         # Get all triplets from the graph
         triplets = []
         for u, v, data in kg.G.edges(data=True):
+            # Get the original forms from the edge data
             triplet = {
-                'subject': kg.G.nodes[u]['name'],
+                'subject': kg.G.nodes[u]['name'],  # Keep lemmatized form
                 'relation': data['relation'],
-                'object': kg.G.nodes[v]['name'],
-                'strength': data['strength']
+                'object': kg.G.nodes[v]['name'],  # Keep lemmatized form
+                'strength': data['strength'],
+                'original_subject': data['original_subject'],
+                'original_object': data['original_object']
             }
             triplets.append(triplet)
         
@@ -63,7 +67,28 @@ def get_relevant_triplets_for_question(text_kg: OpenIEKnowledgeGraph, question: 
             return []
         
         # Extract relevant triplets
-        relevant_triplets = extract_relevant_triplets_from_entities(text_kg, matching_nodes)
+        relevant_triplets = []
+        
+        # For each matching node, get its neighborhood
+        for node in matching_nodes:
+            logger.info(f"Getting neighborhood for node: {text_kg.G.nodes[node]['name']}")
+            # Get all nodes and edges within 2 hops
+            nodes, edges = get_nodes_at_depth_two(text_kg.G, node)
+            
+            # Convert edges to triplets with original forms
+            for u, v, data in edges:
+                triplet = {
+                    'subject': text_kg.G.nodes[u]['name'],  # Keep lemmatized form
+                    'relation': data['relation'],
+                    'object': text_kg.G.nodes[v]['name'],  # Keep lemmatized form
+                    'strength': data['strength'],
+                    'original_subject': data['original_subject'],
+                    'original_object': data['original_object']
+                }
+                
+                if triplet not in relevant_triplets:
+                    relevant_triplets.append(triplet)
+        
         return relevant_triplets
     
     except Exception as e:
@@ -71,11 +96,15 @@ def get_relevant_triplets_for_question(text_kg: OpenIEKnowledgeGraph, question: 
         return []
 
 def format_triplets(triplets: list) -> str:
-    """Format triplets as a string with newline separation."""
+    """Format triplets as a string with newline separation, using original forms."""
     formatted = []
     for t in triplets:
-        formatted.append(f"{t['subject']} -> {t['relation']} -> {t['object']} | {t['strength']}")
-    return "\n".join(formatted)
+        # Use original forms directly from the triplet
+        formatted.append(f"{t['original_subject']} -> {t['relation']} -> {t['original_object']}")
+    formatted_str = "\n".join(formatted)
+    print("\nFormatted triplets being saved to CSV:")
+    print(formatted_str)
+    return formatted_str
 
 def main():
     try:

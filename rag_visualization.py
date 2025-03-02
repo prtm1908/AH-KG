@@ -168,12 +168,20 @@ def process_and_visualize():
         neo4j.clear_database()
         neo4j.create_knowledge_graph(triplets)
         
-        # Plot only the relevant subgraph using NetworkX
+        # Plot the full knowledge graph using NetworkX
+        logger.info("Plotting full knowledge graph...")
+        full_graph = plot_networkx_graph(triplets, "Full Knowledge Graph")
+        full_graph.savefig('full_knowledge_graph.png', bbox_inches='tight', dpi=300)
+        logger.info("Full knowledge graph saved as 'full_knowledge_graph.png'")
+        plt.close()  # Close the full graph figure
+        
+        # Plot the relevant subgraph using NetworkX
         if relevant_triplets:
             logger.info("Plotting relevant subgraph...")
             subgraph = plot_networkx_graph(relevant_triplets, "Relevant Knowledge Graph")
             subgraph.savefig('relevant_knowledge_graph.png', bbox_inches='tight', dpi=300)
             logger.info("Relevant subgraph saved as 'relevant_knowledge_graph.png'")
+            plt.close()  # Close the subgraph figure
         else:
             logger.warning("No relevant triplets found for the query")
         

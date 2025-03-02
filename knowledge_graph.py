@@ -30,7 +30,8 @@ class OpenIEKnowledgeGraph:
             label = 'N_' + label
             
         try:
-            self.G.add_node(label, name=entity)
+            # Store both the lemmatized name and the original name
+            self.G.add_node(label, name=entity, original_name=entity)
         except Exception as e:
             self.logger.error(f"Error creating node for entity: {entity}")
             self.logger.error(str(e))
@@ -62,17 +63,37 @@ class OpenIEKnowledgeGraph:
         """Build the knowledge graph from OpenIE triplets."""
         for triplet in triplets:
             try:
+                # Get both lemmatized and original forms
                 subject = triplet['subject']
                 relation = triplet['relation']
                 obj = triplet['object']
                 strength = triplet.get('strength', 1.0)  # Default strength is 1.0
                 
-                # Create nodes for both entities
-                self.create_entity_node(subject)
-                self.create_entity_node(obj)
+                # Get original forms if available
+                original_subject = triplet.get('original_subject', subject)
+                original_object = triplet.get('original_object', obj)
                 
-                # Create the relationship
-                self.create_relationship(subject, relation, obj, strength)
+                # Create nodes for both entities with their original forms
+                subject_label = subject.replace(' ', '_').replace('-', '_').replace("'", '')
+                object_label = obj.replace(' ', '_').replace('-', '_').replace("'", '')
+                
+                # Ensure labels start with letters
+                if not subject_label[0].isalpha():
+                    subject_label = 'N_' + subject_label
+                if not object_label[0].isalpha():
+                    object_label = 'N_' + object_label
+                
+                # Add nodes with both lemmatized and original forms
+                self.G.add_node(subject_label, name=subject, original_name=original_subject)
+                self.G.add_node(object_label, name=obj, original_name=original_object)
+                
+                # Create the relationship with original forms
+                relation_type = relation.upper().replace(' ', '_').replace('-', '_')
+                self.G.add_edge(subject_label, object_label, 
+                              relation=relation_type, 
+                              strength=strength,
+                              original_subject=original_subject,
+                              original_object=original_object)
                 
             except Exception as e:
                 self.logger.error(f"Error processing triplet: {triplet}")
@@ -469,22 +490,6 @@ def consolidate_and_lemmatize_triplets(triplets):
     
     return unique_triplets
 
-def delemmatize_triplets(triplets):
-    """Convert lemmatized triplets back to their original forms using tracked original forms."""
-    delemmatized_triplets = []
-    
-    for triplet in triplets:
-        # Create new triplet with original forms
-        new_triplet = {
-            'subject': triplet['original_subject'],
-            'relation': triplet['relation'],  # Relations weren't lemmatized
-            'object': triplet['original_object'],
-            'strength': triplet.get('strength', 1.0)
-        }
-        delemmatized_triplets.append(new_triplet)
-    
-    return delemmatized_triplets
-
 def process_text_file(file_path: str):
     """
     Process a text file to generate a knowledge graph.
@@ -561,22 +566,19 @@ def process_text_file(file_path: str):
                 'object': triple['object'],
                 'strength': triple.get('strength', 1.0)
             })
-        
-        # Convert back to original forms
-        print('\nConverting back to original forms...')
-        final_triplets = delemmatize_triplets(lemmatized_triplets)
-        
-        # Add default strength to each triplet
-        for triplet in final_triplets:
-            triplet['strength'] = 1.0
+
+        # Add default strength to each triplet if not present
+        for triplet in lemmatized_triplets:
+            if 'strength' not in triplet:
+                triplet['strength'] = 1.0
 
         print('\nOriginal Text:', text)
-        print('\nFinal delemmatized triplets:')
-        for triple in final_triplets:
+        print('\nFinal lemmatized triplets:')
+        for triple in lemmatized_triplets:
             print('|-', triple)
 
-        # Return the final triplets
-        return final_triplets
+        # Return the lemmatized triplets directly
+        return lemmatized_triplets
 
 def main():
     # Example usage with default text file

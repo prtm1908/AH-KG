@@ -3,3 +3,5 @@ textFiles
 graphCoref.png
 *.log
 *.png
+*.props
+QA_dataset_with_triplets.csv
