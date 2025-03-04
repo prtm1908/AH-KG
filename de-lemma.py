@@ -8,6 +8,38 @@ nltk.download('averaged_perceptron_tagger')
 nltk.download('wordnet')
 nltk.download('omw-1.4')
 
+# Define a mapping dictionary for POS tags.
+# We assume only a limited set of tags (up to 10) are used.
+POS_TAG_MAPPING = {
+    'NN': 0,    # singular noun
+    'NNS': 1,   # plural noun
+    'VB': 2,    # base form verb
+    'VBD': 3,   # past tense verb
+    'VBG': 4,   # gerund/participle verb
+    'VBZ': 5,   # 3rd person singular verb
+    'JJ': 6,    # adjective
+    'RB': 7,    # adverb
+    'DT': 8,    # determiner
+    'PRP': 9    # pronoun
+}
+
+# Inverse mapping to recover the original tag from its code.
+INVERSE_POS_TAG_MAPPING = {v: k for k, v in POS_TAG_MAPPING.items()}
+
+def encode_pos_tag(tag):
+    """
+    Encodes a Penn Treebank POS tag as a 4-bit integer.
+    Defaults to 'NN' if the tag is not in the mapping.
+    """
+    return POS_TAG_MAPPING.get(tag, POS_TAG_MAPPING['NN'])
+
+def decode_pos_tag(code):
+    """
+    Decodes the 4-bit integer back into its Penn Treebank POS tag string.
+    Defaults to 'NN' if the code is not in the inverse mapping.
+    """
+    return INVERSE_POS_TAG_MAPPING.get(code, 'NN')
+
 def penn_to_wordnet(tag):
     """
     Convert a Penn Treebank POS tag to a WordNet POS tag.
@@ -33,7 +65,7 @@ def lemmatize_triplets(raw_triplets):
       - Retrieve Penn-Treebank POS tags.
       - Lemmatize each token using WordNetLemmatizer.
       - Join tokens back into a lemmatized string.
-      - Store the representative (first token's) Penn-Treebank tag and the original raw text in a metadata field.
+      - Store the representative (first token's) POS tag as a 4-bit integer in metadata.
     
     Returns a list of dictionaries with keys: 'subject', 'relationship', 'object', and 'metadata'.
     """
@@ -55,9 +87,14 @@ def lemmatize_triplets(raw_triplets):
         obj_pos  = nltk.pos_tag(obj_tokens_lower)
         
         # Use the first token's tag as the representative tag.
-        subj_tag = subj_pos[0][1] if subj_pos else ''
-        rel_tag  = rel_pos[0][1] if rel_pos else ''
-        obj_tag  = obj_pos[0][1] if obj_pos else ''
+        subj_tag_str = subj_pos[0][1] if subj_pos else 'NN'
+        rel_tag_str  = rel_pos[0][1] if rel_pos else 'NN'
+        obj_tag_str  = obj_pos[0][1] if obj_pos else 'NN'
+        
+        # Encode the POS tags into a 4-bit integer.
+        encoded_subj_tag = encode_pos_tag(subj_tag_str)
+        encoded_rel_tag  = encode_pos_tag(rel_tag_str)
+        encoded_obj_tag  = encode_pos_tag(obj_tag_str)
         
         def lemmatize_tokens(pos_tags):
             lemmas = []
@@ -76,12 +113,9 @@ def lemmatize_triplets(raw_triplets):
             "relationship": rel_lemma,
             "object": obj_lemma,
             "metadata": {
-                "subject_tag": subj_tag,
-                "relationship_tag": rel_tag,
-                "object_tag": obj_tag,
-                "subject_raw": subj_raw,
-                "relationship_raw": rel_raw,
-                "object_raw": obj_raw
+                "subject_tag": encoded_subj_tag,
+                "relationship_tag": encoded_rel_tag,
+                "object_tag": encoded_obj_tag
             }
         })
         
@@ -93,7 +127,8 @@ def de_lemmatize_triplets(triplets_with_metadata):
     de-lemmatize (i.e. re-inflect) the subject using lemminflect's getInflection function.
     
     For each triplet:
-      - Retrieve the lemmatized subject (which is now in its base form) and its stored Penn-Treebank tag.
+      - Retrieve the lemmatized subject (base form) and its stored 4-bit POS tag.
+      - Decode the stored tag back to its original Penn-Treebank string.
       - Call getInflection on the base form to obtain the inflected version.
       - Update the subject with the returned candidate (if available).
     
@@ -104,11 +139,12 @@ def de_lemmatize_triplets(triplets_with_metadata):
     for trip in triplets_with_metadata:
         meta = trip.get("metadata", {})
         subj_lemma = trip.get("subject", "")
-        subj_tag = meta.get("subject_tag", "")
-        
-        if subj_tag:
-            # getInflection expects a base form; it returns a tuple of candidate inflections.
-            infl_candidates = getInflection(subj_lemma, subj_tag, inflect_oov=True)
+        # Retrieve the stored 4-bit POS code and decode it.
+        subj_tag_code = meta.get("subject_tag", None)
+        if subj_tag_code is not None:
+            decoded_subj_tag = decode_pos_tag(subj_tag_code)
+            # getInflection expects the base form and the tag string.
+            infl_candidates = getInflection(subj_lemma, decoded_subj_tag, inflect_oov=True)
             new_subject = infl_candidates[0] if infl_candidates else subj_lemma
         else:
             new_subject = subj_lemma
@@ -127,13 +163,13 @@ if __name__ == "__main__":
         ("Jumped", "leads to", "success"),
     ]
     
-    # First, lemmatize the raw triplets and store metadata.
+    # First, lemmatize the raw triplets and store metadata with encoded POS tags.
     lemmatized = lemmatize_triplets(raw_triplets)
-    print("Lemmatized Triplets with Metadata:")
+    print("Lemmatized Triplets with Encoded POS Tag Metadata:")
     for t in lemmatized:
         print(t)
     
-    # Next, de-lemmatize (inflect) the subject using the inflection function.
+    # Next, de-lemmatize (inflect) the subject by decoding the POS tag.
     de_lemmatized = de_lemmatize_triplets(lemmatized)
     print("\nTriplets after De-lemmatizing the Subject:")
     for t in de_lemmatized:

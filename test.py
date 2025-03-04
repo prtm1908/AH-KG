@@ -62,8 +62,6 @@ def generate_answers_from_csv(
                     continue
 
                 total_questions += 1
-                print(triplets_text)
-                break
 
                 # Create the prompt for the LLM
                 # We instruct the model to ONLY use the triplets to answer the question.
@@ -102,7 +100,6 @@ def generate_answers_from_csv(
                 except Exception as e:
                     print(e)
                     row[answer_col] = f"Error: {e}"
-            break
             # Write the row (including the newly generated answers) back to the output CSV
             writer.writerow(row)
 
