@@ -6,3 +6,5 @@ matplotlib
 pygraphviz
 Pillow
 numpy
+lemminflect
+nltk
