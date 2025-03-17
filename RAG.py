@@ -16,7 +16,7 @@ nlp = spacy.load("en_core_web_sm")
 def start_corenlp_server():
     """Start the Stanford CoreNLP server."""
     # Change to the CoreNLP directory
-    corenlp_dir = "/Users/pratham/.stanfordnlp_resources/stanford-corenlp-4.5.3"
+    corenlp_dir = r"C:\Users\prath\stanford-corenlp-4.5.8"
     if not os.path.exists(corenlp_dir):
         raise Exception(f"CoreNLP directory not found at {corenlp_dir}")
     

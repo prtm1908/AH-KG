@@ -3,6 +3,7 @@ stanford-openie
 fastcoref
 networkx
 matplotlib
-pygraphviz
+# pygraphviz
 Pillow
 numpy
+neo4j
