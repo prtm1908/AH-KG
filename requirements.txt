@@ -10,3 +10,5 @@ neo4j
 torch
 torch-geometric
 scikit-learn
+nltk
+lemminflect

@@ -1,5 +1,4 @@
 from RAG import knowledge_graph_rag, OpenIEKnowledgeGraph, process_text_file, start_corenlp_server, extract_query_entities, find_matching_nodes, extract_relevant_triplets_from_entities
-from graphsage_embeddings import generate_graphsage_embeddings
 from neo4j import GraphDatabase
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -32,45 +31,40 @@ class Neo4jConnector:
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
             
-    def create_knowledge_graph(self, triplets, node_embeddings=None):
-        """Create knowledge graph in Neo4j from triplets and node embeddings."""
+    def create_knowledge_graph(self, text_kg: OpenIEKnowledgeGraph):
+        """Create knowledge graph in Neo4j from the OpenIEKnowledgeGraph object."""
         with self.driver.session() as session:
-            # First, collect all unique entities and create them as labels
-            unique_entities = set()
-            for triplet in triplets:
-                unique_entities.add(triplet['subject'])
-                unique_entities.add(triplet['object'])
-            
-            # Create nodes for each unique entity
-            for entity in unique_entities:
+            # Get all nodes and their attributes
+            for node in text_kg.G.nodes():
+                node_data = text_kg.G.nodes[node]
+                
                 # Convert entity to valid label name (remove spaces and special chars)
-                label = entity.replace(' ', '_').replace('-', '_').upper()
+                label = node_data['name'].replace(' ', '_').replace('-', '_').upper()
                 if not label[0].isalpha():
                     label = 'E_' + label
                 
                 # Prepare node properties
                 node_props = {
-                    'name': entity,
-                    'text': entity,
-                    'caption': entity
+                    'name': node_data['name'],
+                    'text': node_data['name'],
+                    'caption': node_data['name']
                 }
                 
                 # Add embedding if available
-                if node_embeddings and entity in node_embeddings:
-                    node_props['embedding'] = node_embeddings[entity]
+                if 'embedding' in node_data:
+                    node_props['embedding'] = node_data['embedding']
                 
                 cypher_query = f"""
                 MERGE (n:{label} {{name: $name}})
                 SET n += $props
                 """
-                session.run(cypher_query, name=entity, props=node_props)
+                session.run(cypher_query, name=node_data['name'], props=node_props)
             
-            # Then create relationships
-            for triplet in triplets:
-                # Convert relation and labels to valid Neo4j identifiers
-                rel_type = triplet['relation'].upper().replace(' ', '_').replace('-', '_')
+            # Create relationships
+            for u, v, data in text_kg.G.edges(data=True):
+                # Convert relation to valid Neo4j identifier
+                rel_type = data['relation'].upper().replace(' ', '_').replace('-', '_')
                 
-                # Create relationship without using labels in the MATCH
                 cypher_query = f"""
                 MATCH (s {{name: $subject}})
                 MATCH (o {{name: $object}})
@@ -81,10 +75,10 @@ class Neo4jConnector:
                 SET r.strength = $strength
                 """
                 session.run(cypher_query, 
-                          subject=triplet['subject'],
-                          object=triplet['object'],
-                          relation=triplet['relation'],
-                          strength=triplet['strength'])
+                          subject=text_kg.G.nodes[u]['name'],
+                          object=text_kg.G.nodes[v]['name'],
+                          relation=data['relation'],
+                          strength=data['strength'])
             
             # Set display settings for all nodes
             session.run("""
@@ -156,11 +150,7 @@ def process_and_visualize():
         logger.info("Processing text file...")
         triplets = process_text_file(TEXT_FILE_PATH)
         
-        # Generate GraphSAGE embeddings directly from triplets
-        logger.info("Generating GraphSAGE embeddings...")
-        node_embeddings = generate_graphsage_embeddings(triplets)
-        
-        # Build knowledge graph for visualization
+        # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
         text_kg.build_knowledge_graph(triplets)
         
@@ -174,7 +164,7 @@ def process_and_visualize():
         logger.info("Creating knowledge graph in Neo4j...")
         neo4j = Neo4jConnector()
         neo4j.clear_database()
-        neo4j.create_knowledge_graph(triplets, node_embeddings)
+        neo4j.create_knowledge_graph(text_kg)
         
         # Plot the full knowledge graph using NetworkX
         logger.info("Plotting full knowledge graph...")

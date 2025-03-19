@@ -2,22 +2,24 @@ from openie import StanfordOpenIE
 import fastcoref
 import re
 import networkx as nx
-import matplotlib.pyplot as plt
 import logging
 from typing import List, Dict
-import spacy
 from collections import defaultdict
+from graphsage_embeddings import generate_graphsage_embeddings
+from de_lemma import lemmatize_triplets, de_lemmatize_triplets
 
 class OpenIEKnowledgeGraph:
     def __init__(self):
         """Initialize the NetworkX graph and set up logging."""
         self.G = nx.MultiDiGraph()  # Using MultiDiGraph to allow multiple relationships between same nodes
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO) 
         self.logger = logging.getLogger(__name__)
+        self.node_embeddings = None  # Store node embeddings
 
     def clear_graph(self):
         """Remove all nodes and relationships from the graph."""
         self.G.clear()
+        self.node_embeddings = None
         self.logger.info("Graph cleared")
 
     def create_entity_node(self, entity: str):
@@ -60,7 +62,8 @@ class OpenIEKnowledgeGraph:
             raise
 
     def build_knowledge_graph(self, triplets: List[Dict]):
-        """Build the knowledge graph from OpenIE triplets."""
+        """Build the knowledge graph from OpenIE triplets and generate GraphSAGE embeddings."""
+        # First build the graph structure
         for triplet in triplets:
             try:
                 # Get both lemmatized and original forms
@@ -99,8 +102,18 @@ class OpenIEKnowledgeGraph:
                 self.logger.error(f"Error processing triplet: {triplet}")
                 self.logger.error(str(e))
                 continue
+
+        # Generate GraphSAGE embeddings for all nodes
+        self.logger.info("Generating GraphSAGE embeddings...")
+        self.node_embeddings = generate_graphsage_embeddings(triplets)
         
-        self.logger.info("Knowledge graph built successfully")
+        # Add embeddings as node attributes
+        for node in self.G.nodes():
+            node_name = self.G.nodes[node]['name']
+            if node_name in self.node_embeddings:
+                self.G.nodes[node]['embedding'] = self.node_embeddings[node_name]
+        
+        self.logger.info("Knowledge graph built successfully with embeddings")
 
     def get_graph_statistics(self) -> Dict:
         """Get basic statistics about the knowledge graph."""
@@ -132,83 +145,6 @@ class OpenIEKnowledgeGraph:
                 "node_types": [],
                 "relationship_types": []
             }
-
-    def visualize_graph(self, figsize=(16, 12)):
-        """Visualize the knowledge graph using NetworkX and Matplotlib with Graphviz neato layout."""
-        plt.figure(figsize=figsize)
-        
-        try:
-            # Calculate node degrees for sizing
-            degrees = dict(self.G.degree())
-            
-            # Use Graphviz neato layout
-            pos = nx.nx_agraph.graphviz_layout(self.G, prog='neato', args='-Goverlap=false -Gsplines=true')
-            
-            # Scale node sizes based on degree centrality but with smaller range
-            node_sizes = [1500 + (degrees[node] * 100) for node in self.G.nodes()]
-            
-            # Get edge strengths for width and alpha
-            edge_strengths = nx.get_edge_attributes(self.G, 'strength')
-            edge_widths = [strength * 2 for strength in edge_strengths.values()]
-            edge_alphas = [min(0.2 + strength * 0.3, 0.9) for strength in edge_strengths.values()]
-            
-            # Draw edges with curved arrows and strength-based width/alpha
-            nx.draw_networkx_edges(self.G, pos, 
-                                 edge_color='gray',
-                                 width=edge_widths,
-                                 alpha=edge_alphas,
-                                 arrows=True,
-                                 arrowsize=15,
-                                 connectionstyle='arc3,rad=0.2',  # Add curve to edges
-                                 min_source_margin=20,
-                                 min_target_margin=20)
-            
-            # Draw nodes with varying sizes
-            nx.draw_networkx_nodes(self.G, pos,
-                                 node_color='lightblue',
-                                 node_size=node_sizes,
-                                 alpha=0.7)
-            
-            # Draw node labels with improved visibility
-            node_labels = nx.get_node_attributes(self.G, 'name')
-            for node, (x, y) in pos.items():
-                plt.text(x, y, node_labels[node],
-                        fontsize=8,
-                        bbox=dict(facecolor='white',
-                                alpha=0.8,
-                                edgecolor='lightgray',
-                                boxstyle='round,pad=0.5'),
-                        horizontalalignment='center',
-                        verticalalignment='center')
-            
-            # Draw edge labels with strength
-            edge_labels = {}
-            for (u, v, k), relation in nx.get_edge_attributes(self.G, 'relation').items():
-                strength = self.G[u][v][k]['strength']
-                edge_labels[(u, v)] = f"{relation}\n(s={strength:.1f})"
-            
-            nx.draw_networkx_edge_labels(self.G, pos,
-                                       edge_labels=edge_labels,
-                                       font_size=6,
-                                       alpha=0.7,
-                                       bbox=dict(facecolor='white',
-                                               alpha=0.7,
-                                               edgecolor='none',
-                                               pad=0.2))
-            
-            plt.title("OpenIE + FastCoref", pad=20)
-            plt.axis('off')
-            plt.tight_layout()
-            
-        except ImportError:
-            self.logger.error("Graphviz not installed. Please install graphviz and pygraphviz.")
-            raise
-        except Exception as e:
-            self.logger.error(f"Error visualizing graph: {str(e)}")
-            raise
-        
-        plt.savefig('graphCoref.png', bbox_inches='tight', dpi=300)
-        plt.close()
 
 def is_pronoun(word):
     pronouns = {'he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them', 'their', 'theirs', 'it', 'its'}
@@ -424,42 +360,39 @@ def consolidate_all_entities_and_relations(triplets):
     
     return entity_mapping, relation_mapping
 
-def lemmatize_entity(text):
-    """Lemmatize each word in the entity text."""
-    nlp = spacy.load("en_core_web_sm")
-    doc = nlp(text)
-    return ' '.join([token.lemma_ for token in doc]), [token.text for token in doc]
-
 def consolidate_and_lemmatize_triplets(triplets):
     """Consolidate similar entities and relations, then lemmatize all entities in triplets."""
     # First consolidate all entities and relations together
     entity_mapping, relation_mapping = consolidate_all_entities_and_relations(triplets)
     
-    # Create new triplets with consolidated entities and relations, then lemmatize
-    consolidated_triplets = []
+    # Convert triplets to raw format for lemmatization
+    raw_triplets = []
     for triplet in triplets:
-        new_triplet = triplet.copy()
+        # Store original forms
+        original_subject = triplet['subject']
+        original_object = triplet['object']
         
-        # Store the original unconsolidated and unlemmatized forms
-        new_triplet['original_subject'] = triplet['subject']
-        new_triplet['original_object'] = triplet['object']
-        
-        # Apply consolidation for subject
+        # Apply consolidation
         subject = entity_mapping.get(triplet['subject'], triplet['subject'])
-        subject_lemmatized, subject_originals = lemmatize_entity(subject)
-        new_triplet['subject'] = subject_lemmatized
-        new_triplet['subject_original_forms'] = subject_originals
-        
-        # Apply consolidation for relation
         relation = relation_mapping.get(triplet['relation'], triplet['relation'])
-        new_triplet['relation'] = relation  # Don't lemmatize relations
-        
-        # Apply consolidation for object
         obj = entity_mapping.get(triplet['object'], triplet['object'])
-        obj_lemmatized, obj_originals = lemmatize_entity(obj)
-        new_triplet['object'] = obj_lemmatized
-        new_triplet['object_original_forms'] = obj_originals
         
+        raw_triplets.append((subject, relation, obj))
+    
+    # Lemmatize the triplets
+    lemmatized_triplets = lemmatize_triplets(raw_triplets)
+    
+    # Add original forms and other metadata back
+    consolidated_triplets = []
+    for i, lemmatized in enumerate(lemmatized_triplets):
+        new_triplet = {
+            'subject': lemmatized['subject'],
+            'relation': lemmatized['relationship'],
+            'object': lemmatized['object'],
+            'original_subject': triplets[i]['subject'],
+            'original_object': triplets[i]['object'],
+            'metadata': lemmatized['metadata']
+        }
         consolidated_triplets.append(new_triplet)
     
     # Remove any duplicates that might have been created during consolidation
