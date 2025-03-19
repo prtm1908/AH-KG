@@ -7,3 +7,6 @@ matplotlib
 Pillow
 numpy
 neo4j
+torch
+torch-geometric
+scikit-learn
