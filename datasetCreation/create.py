@@ -16,6 +16,7 @@ from RAG import (
     OpenIEKnowledgeGraph,
     get_nodes_at_depth_two
 )
+from de_lemma import de_lemmatize_triplets
 
 import logging
 
@@ -44,7 +45,8 @@ def process_paragraph_to_triplets(text: str, server_process) -> list:
                 'object': kg.G.nodes[v]['name'],  # Keep lemmatized form
                 'strength': data['strength'],
                 'original_subject': data['original_subject'],
-                'original_object': data['original_object']
+                'original_object': data['original_object'],
+                'metadata': data.get('metadata', {})  # Include metadata if available
             }
             triplets.append(triplet)
         
@@ -83,7 +85,8 @@ def get_relevant_triplets_for_question(text_kg: OpenIEKnowledgeGraph, question: 
                     'object': text_kg.G.nodes[v]['name'],  # Keep lemmatized form
                     'strength': data['strength'],
                     'original_subject': data['original_subject'],
-                    'original_object': data['original_object']
+                    'original_object': data['original_object'],
+                    'metadata': data.get('metadata', {})  # Include metadata if available
                 }
                 
                 if triplet not in relevant_triplets:
@@ -97,10 +100,13 @@ def get_relevant_triplets_for_question(text_kg: OpenIEKnowledgeGraph, question: 
 
 def format_triplets(triplets: list) -> str:
     """Format triplets as a string with newline separation, using original forms."""
+    # First de-lemmatize the triplets using POS tag metadata
+    de_lemmatized = de_lemmatize_triplets(triplets)
+    
     formatted = []
-    for t in triplets:
-        # Use original forms directly from the triplet
-        formatted.append(f"{t['original_subject']} -> {t['relation']} -> {t['original_object']}")
+    for t in de_lemmatized:
+        # Use de-lemmatized subject and original object
+        formatted.append(f"{t['subject']} -> {t['relation']} -> {t['original_object']}")
     formatted_str = "\n".join(formatted)
     print("\nFormatted triplets being saved to CSV:")
     print(formatted_str)
