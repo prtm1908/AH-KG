@@ -6,42 +6,19 @@ import tempfile
 import logging
 import spacy
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging with consistent format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Load spaCy model
 nlp = spacy.load("en_core_web_sm")
 
-def start_corenlp_server():
-    """Start the Stanford CoreNLP server."""
-    # Change to the CoreNLP directory
-    corenlp_dir = r"C:\Users\prath\stanford-corenlp-4.5.8"
-    if not os.path.exists(corenlp_dir):
-        raise Exception(f"CoreNLP directory not found at {corenlp_dir}")
-    
-    # Start the server
-    server_cmd = [
-        "java", "-mx4g", "-cp", "*",
-        "edu.stanford.nlp.pipeline.StanfordCoreNLPServer",
-        "-annotators", "tokenize,ssplit,pos,lemma,depparse,natlog,coref,openie",
-        "-port", "9000",
-        "-timeout", "30000"
-    ]
-    
-    try:
-        # Start server in background
-        process = subprocess.Popen(
-            server_cmd,
-            cwd=corenlp_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        logger.info("CoreNLP server started successfully")
-        return process
-    except Exception as e:
-        logger.error(f"Failed to start CoreNLP server: {str(e)}")
-        raise
+def get_corenlp_server():
+    """Get the CoreNLP server URL from environment or use default."""
+    return os.environ.get('CORENLP_SERVER', 'http://corenlp:9000')
 
 def get_nodes_at_depth_two(G, start_node, max_depth=2):
     """Get all nodes and edges within 2 hops of the start node."""
@@ -170,9 +147,6 @@ def knowledge_graph_rag(text_file_path: str, query: str):
     Returns:
         list: List of relevant triplets
     """
-    # Start CoreNLP server
-    server_process = start_corenlp_server()
-    
     try:
         # Read the text file
         with open(text_file_path, 'r', encoding='utf-8') as f:
@@ -203,11 +177,9 @@ def knowledge_graph_rag(text_file_path: str, query: str):
         
         return relevant_triplets
         
-    finally:
-        # Terminate the CoreNLP server
-        server_process.terminate()
-        server_process.wait()
-        logger.info("CoreNLP server stopped")
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        return []
 
 def main():
     # Example usage
@@ -215,16 +187,16 @@ def main():
     query = "What is a computer mouse?"  # Changed to a more relevant query
     
     relevant_triplets = knowledge_graph_rag(text_file_path, query)
-    print("\nRelevant triplets for the query:")
+    logger.info("\nRelevant triplets for the query:")
     if not relevant_triplets:
-        print("No relevant triplets found")
+        logger.info("No relevant triplets found")
     else:
         for triplet in relevant_triplets:
-            print(f"Subject: {triplet['subject']}")
-            print(f"Relation: {triplet['relation']}")
-            print(f"Object: {triplet['object']}")
-            print(f"Strength: {triplet['strength']}")
-            print()
+            logger.info(f"Subject: {triplet['subject']}")
+            logger.info(f"Relation: {triplet['relation']}")
+            logger.info(f"Object: {triplet['object']}")
+            logger.info(f"Strength: {triplet['strength']}")
+            logger.info("")
 
 if __name__ == "__main__":
     main()

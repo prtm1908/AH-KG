@@ -3,11 +3,6 @@ from nltk.stem import WordNetLemmatizer
 from nltk.corpus import wordnet
 from lemminflect import getInflection
 
-# Ensure the required NLTK resources are downloaded.
-nltk.download('averaged_perceptron_tagger')
-nltk.download('wordnet')
-nltk.download('omw-1.4')
-
 # Define a mapping dictionary for POS tags.
 # We assume only a limited set of tags (up to 10) are used.
 POS_TAG_MAPPING = {

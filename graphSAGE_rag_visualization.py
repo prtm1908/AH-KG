@@ -1,91 +1,37 @@
-from RAG import knowledge_graph_rag, OpenIEKnowledgeGraph, process_text_file, start_corenlp_server, extract_query_entities, find_matching_nodes, extract_relevant_triplets_from_entities
-from neo4j import GraphDatabase
+from RAG import (
+    knowledge_graph_rag, 
+    OpenIEKnowledgeGraph, 
+    process_text_file, 
+    extract_query_entities, 
+    find_matching_nodes, 
+    extract_relevant_triplets_from_entities
+)
 import networkx as nx
 import matplotlib.pyplot as plt
 import logging
+import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, HttpUrl
+import requests
+import tempfile
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Set up logging with consistent format
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Configuration variables
-TEXT_FILE_PATH = "textFiles/text1.txt"  # Path to your input text file
-QUERY = "What is a computer mouse?"  # Your query here
+# Initialize FastAPI app
+app = FastAPI(title="Knowledge Graph API")
 
-# Neo4j configuration
-NEO4J_URI = "neo4j+s://cd0d8c00.databases.neo4j.io"
-NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "c63yXkQm1fVLbpvEHvZsrUbTNiEMMyhU-VPiizHYEes"
+# Define request models
+class VisualizationRequest(BaseModel):
+    text_url: HttpUrl
+    query: str
 
-class Neo4jConnector:
-    def __init__(self, uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD):
-        """Initialize Neo4j connection."""
-        self.driver = GraphDatabase.driver(uri, auth=(user, password))
-        
-    def close(self):
-        """Close the Neo4j connection."""
-        self.driver.close()
-        
-    def clear_database(self):
-        """Clear all nodes and relationships in Neo4j."""
-        with self.driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
-            
-    def create_knowledge_graph(self, text_kg: OpenIEKnowledgeGraph):
-        """Create knowledge graph in Neo4j from the OpenIEKnowledgeGraph object."""
-        with self.driver.session() as session:
-            # Get all nodes and their attributes
-            for node in text_kg.G.nodes():
-                node_data = text_kg.G.nodes[node]
-                
-                # Convert entity to valid label name (remove spaces and special chars)
-                label = node_data['name'].replace(' ', '_').replace('-', '_').upper()
-                if not label[0].isalpha():
-                    label = 'E_' + label
-                
-                # Prepare node properties
-                node_props = {
-                    'name': node_data['name'],
-                    'text': node_data['name'],
-                    'caption': node_data['name']
-                }
-                
-                # Add embedding if available
-                if 'embedding' in node_data:
-                    node_props['embedding'] = node_data['embedding']
-                
-                cypher_query = f"""
-                MERGE (n:{label} {{name: $name}})
-                SET n += $props
-                """
-                session.run(cypher_query, name=node_data['name'], props=node_props)
-            
-            # Create relationships
-            for u, v, data in text_kg.G.edges(data=True):
-                # Convert relation to valid Neo4j identifier
-                rel_type = data['relation'].upper().replace(' ', '_').replace('-', '_')
-                
-                cypher_query = f"""
-                MATCH (s {{name: $subject}})
-                MATCH (o {{name: $object}})
-                CREATE (s)-[r:{rel_type}]->(o)
-                SET r.type = $relation
-                SET r.name = $relation
-                SET r.caption = $relation
-                SET r.strength = $strength
-                """
-                session.run(cypher_query, 
-                          subject=text_kg.G.nodes[u]['name'],
-                          object=text_kg.G.nodes[v]['name'],
-                          relation=data['relation'],
-                          strength=data['strength'])
-            
-            # Set display settings for all nodes
-            session.run("""
-            MATCH (n)
-            SET n.displayName = n.name
-            SET n.title = n.name
-            """)
+class KnowledgeGraphRequest(BaseModel):
+    text_url: HttpUrl
 
 def plot_networkx_graph(triplets, title="Knowledge Graph"):
     """Plot knowledge graph using NetworkX."""
@@ -135,20 +81,61 @@ def plot_networkx_graph(triplets, title="Knowledge Graph"):
     plt.axis('off')
     return plt
 
-def process_and_visualize():
-    """Main function to process text and create visualizations."""
-    # Start CoreNLP server
-    server_process = None
-    neo4j = None
+async def process_text_from_url(url: str) -> str:
+    """Fetch text content from URL and save to temporary file for processing."""
+    try:
+        logger.info(f"Attempting to fetch content from: {url}")
+        
+        # Handle Google Drive URLs
+        if 'drive.google.com' in url:
+            # Check if it's already in the correct format
+            if 'export=download' in url:
+                file_id = url.split('id=')[1].split('&')[0] if 'id=' in url else None
+            else:
+                # Try to extract file ID from sharing URL
+                try:
+                    file_id = url.split('/d/')[1].split('/')[0]
+                except IndexError:
+                    file_id = None
+            
+            if file_id:
+                # Use the direct download URL
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                logger.info(f"Converted to Google Drive direct URL: {url}")
+            else:
+                logger.warning("Could not extract file ID from Google Drive URL")
+        
+        response = requests.get(url, timeout=30)  # Add timeout
+        response.raise_for_status()
+        
+        logger.info(f"Successfully fetched content, size: {len(response.text)} bytes")
+        
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
+            temp_file.write(response.text)
+            temp_path = temp_file.name
+            logger.info(f"Content saved to temporary file: {temp_path}")
+            
+        return temp_path
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="Request timed out while fetching the URL")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch text from URL: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+
+async def process_and_visualize(text_url: str, query: str):
+    """Process text and create visualizations."""
+    temp_file_path = None
     
     try:
-        # Start the CoreNLP server first
-        logger.info("Starting CoreNLP server...")
-        server_process = start_corenlp_server()
+        # Fetch text from URL and save to temporary file
+        logger.info("Fetching text from URL...")
+        temp_file_path = await process_text_from_url(text_url)
         
         # Process text file and get triplets
-        logger.info("Processing text file...")
-        triplets = process_text_file(TEXT_FILE_PATH)
+        logger.info("Processing text content...")
+        triplets = process_text_file(temp_file_path)
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
@@ -156,15 +143,9 @@ def process_and_visualize():
         
         # Get relevant triplets using the existing knowledge graph
         logger.info("Processing query using RAG...")
-        query_entities = extract_query_entities(QUERY)
+        query_entities = extract_query_entities(query)
         matching_nodes = find_matching_nodes(text_kg, query_entities)
         relevant_triplets = extract_relevant_triplets_from_entities(text_kg, matching_nodes)
-        
-        # Connect to Neo4j and create knowledge graph with embeddings
-        logger.info("Creating knowledge graph in Neo4j...")
-        neo4j = Neo4jConnector()
-        neo4j.clear_database()
-        neo4j.create_knowledge_graph(text_kg)
         
         # Plot the full knowledge graph using NetworkX
         logger.info("Plotting full knowledge graph...")
@@ -183,20 +164,60 @@ def process_and_visualize():
         else:
             logger.warning("No relevant triplets found for the query")
         
-        logger.info("Visualization complete!")
+        return {
+            "status": "success",
+            "message": "Visualization complete!",
+            "full_graph_path": "full_knowledge_graph.png",
+            "relevant_graph_path": "relevant_knowledge_graph.png" if relevant_triplets else None
+        }
             
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
-        raise
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up Neo4j connection
-        if neo4j:
-            neo4j.close()
-        # Stop the CoreNLP server
-        if server_process:
-            logger.info("Stopping CoreNLP server...")
-            server_process.terminate()
-            server_process.wait()
+        # Clean up
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)  # Delete temporary file
+
+@app.post("/visualize")
+async def create_visualization(request: VisualizationRequest):
+    """API endpoint to create knowledge graph visualizations."""
+    return await process_and_visualize(str(request.text_url), request.query)
+
+@app.post("/create-knowledge-graph")
+async def create_knowledge_graph(request: KnowledgeGraphRequest):
+    """API endpoint to create a knowledge graph from text URL."""
+    temp_file_path = None
+    
+    try:
+        # Fetch text from URL and save to temporary file
+        logger.info("Fetching text from URL...")
+        temp_file_path = await process_text_from_url(str(request.text_url))
+        
+        # Process text file and get triplets
+        logger.info("Processing text content...")
+        triplets = process_text_file(temp_file_path)
+        
+        # Build knowledge graph with embeddings
+        text_kg = OpenIEKnowledgeGraph()
+        text_kg.build_knowledge_graph(triplets)
+        
+        return {
+            "status": "success",
+            "message": "Knowledge graph created successfully!",
+            "triplets_count": len(triplets),
+            "nodes_count": len(text_kg.G.nodes()),
+            "relationships_count": len(text_kg.G.edges())
+        }
+            
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Clean up
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)  # Delete temporary file
 
 if __name__ == "__main__":
-    process_and_visualize() 
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

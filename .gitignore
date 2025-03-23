@@ -5,3 +5,5 @@ graphCoref.png
 *.png
 *.props
 QA_dataset_with_triplets.csv
+
+.env

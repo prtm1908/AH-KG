@@ -1,4 +1,3 @@
-from openie import StanfordOpenIE
 import fastcoref
 import re
 import networkx as nx
@@ -7,12 +6,39 @@ from typing import List, Dict
 from collections import defaultdict
 from graphsage_embeddings import generate_graphsage_embeddings
 from de_lemma import lemmatize_triplets, de_lemmatize_triplets
+import requests
+import time
+import json
+import os
+from neo4j import GraphDatabase
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, HttpUrl
+import tempfile
+from typing import TYPE_CHECKING
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Initialize FastAPI app
+app = FastAPI(title="Knowledge Graph Creation API")
+
+# Define request model
+class KnowledgeGraphRequest(BaseModel):
+    text_url: HttpUrl
+
+# Neo4j configuration from environment variables
+NEO4J_URI = os.environ.get('NEO4J_URI', 'bolt://localhost:7687')
+NEO4J_USER = os.environ.get('NEO4J_USER', 'neo4j')
+NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD', 'password')
 
 class OpenIEKnowledgeGraph:
     def __init__(self):
         """Initialize the NetworkX graph and set up logging."""
         self.G = nx.MultiDiGraph()  # Using MultiDiGraph to allow multiple relationships between same nodes
-        logging.basicConfig(level=logging.INFO) 
         self.logger = logging.getLogger(__name__)
         self.node_embeddings = None  # Store node embeddings
 
@@ -115,36 +141,75 @@ class OpenIEKnowledgeGraph:
         
         self.logger.info("Knowledge graph built successfully with embeddings")
 
-    def get_graph_statistics(self) -> Dict:
-        """Get basic statistics about the knowledge graph."""
-        try:
-            # Count nodes
-            node_count = self.G.number_of_nodes()
+class Neo4jConnector:
+    def __init__(self, uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD):
+        """Initialize Neo4j connection."""
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
+        
+    def close(self):
+        """Close the Neo4j connection."""
+        self.driver.close()
+        
+    def clear_database(self):
+        """Clear all nodes and relationships in Neo4j."""
+        with self.driver.session() as session:
+            session.run("MATCH (n) DETACH DELETE n")
             
-            # Count relationships
-            rel_count = self.G.number_of_edges()
+    def create_knowledge_graph(self, text_kg: 'OpenIEKnowledgeGraph'):
+        """Create knowledge graph in Neo4j from the OpenIEKnowledgeGraph object."""
+        with self.driver.session() as session:
+            # Get all nodes and their attributes
+            for node in text_kg.G.nodes():
+                node_data = text_kg.G.nodes[node]
+                
+                # Convert entity to valid label name (remove spaces and special chars)
+                label = node_data['name'].replace(' ', '_').replace('-', '_').upper()
+                if not label[0].isalpha():
+                    label = 'E_' + label
+                
+                # Prepare node properties
+                node_props = {
+                    'name': node_data['name'],
+                    'text': node_data['name'],
+                    'caption': node_data['name']
+                }
+                
+                # Add embedding if available
+                if 'embedding' in node_data:
+                    node_props['embedding'] = node_data['embedding']
+                
+                cypher_query = f"""
+                MERGE (n:{label} {{name: $name}})
+                SET n += $props
+                """
+                session.run(cypher_query, name=node_data['name'], props=node_props)
             
-            # Get all unique node types (labels)
-            node_types = list(set(nx.get_node_attributes(self.G, 'name').values()))
+            # Create relationships
+            for u, v, data in text_kg.G.edges(data=True):
+                # Convert relation to valid Neo4j identifier
+                rel_type = data['relation'].upper().replace(' ', '_').replace('-', '_')
+                
+                cypher_query = f"""
+                MATCH (s {{name: $subject}})
+                MATCH (o {{name: $object}})
+                CREATE (s)-[r:{rel_type}]->(o)
+                SET r.type = $relation
+                SET r.name = $relation
+                SET r.caption = $relation
+                SET r.strength = $strength
+                """
+                session.run(cypher_query, 
+                          subject=text_kg.G.nodes[u]['name'],
+                          object=text_kg.G.nodes[v]['name'],
+                          relation=data['relation'],
+                          strength=data['strength'])
             
-            # Get relationship types
-            rel_types = list(set(nx.get_edge_attributes(self.G, 'relation').values()))
-            
-            return {
-                "node_count": node_count,
-                "relationship_count": rel_count,
-                "node_types": node_types,
-                "relationship_types": rel_types
-            }
-        except Exception as e:
-            self.logger.error("Error getting graph statistics")
-            self.logger.error(str(e))
-            return {
-                "node_count": 0,
-                "relationship_count": 0,
-                "node_types": [],
-                "relationship_types": []
-            }
+            # Set display settings for all nodes
+            session.run("""
+            MATCH (n)
+            SET n.displayName = n.name
+            SET n.title = n.name
+            """)
 
 def is_pronoun(word):
     pronouns = {'he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them', 'their', 'theirs', 'it', 'its'}
@@ -423,6 +488,36 @@ def consolidate_and_lemmatize_triplets(triplets):
     
     return unique_triplets
 
+def download_and_save_text(url, output_file):
+    """Download text from URL and save to file."""
+    logger.info(f"Downloading text from {url}")
+    response = requests.get(url)
+    if response.status_code == 200:
+        text = response.text
+        logger.info(f"Downloaded text content (first 100 chars): {text[:100]}...")
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(text)
+        logger.info(f"Saved text to {output_file}")
+        return True
+    else:
+        logger.error(f"Failed to download text. Status code: {response.status_code}")
+        return False
+
+def extract_triplets_from_corenlp_response(response_json):
+    """Extract OpenIE triplets from CoreNLP server response."""
+    triplets = []
+    for sentence in response_json['sentences']:
+        if 'openie' in sentence:
+            for triple in sentence['openie']:
+                triplet = {
+                    'subject': triple['subject'],
+                    'relation': triple['relation'],
+                    'object': triple['object'],
+                    'strength': 1.0  # Default strength
+                }
+                triplets.append(triplet)
+    return triplets
+
 def process_text_file(file_path: str):
     """
     Process a text file to generate a knowledge graph.
@@ -433,89 +528,250 @@ def process_text_file(file_path: str):
     Returns:
         list: List of triplets extracted from the text
     """
+    # If file_path is a URL, download it first
+    if file_path.startswith('http'):
+        temp_file = 'temp_text.txt'
+        if not download_and_save_text(file_path, temp_file):
+            logger.error("Failed to download text from URL")
+            return []
+        file_path = temp_file
+
     # Initialize models
     model = fastcoref.FCoref()
-    properties = {
-        'openie.affinity_probability_cap': 2/3,
-        'openie.resolve_coref': True,
-    }
 
     # Read original text
     with open(file_path, encoding='utf8') as f:
         text = f.read()
+    logger.info(f"Original text read from file: {text}")
+    
+    # Clean the text - remove special annotations and normalize
+    text = re.sub(r'\[nb \d+\]|\[\d+\]', '', text)  # Remove [nb 1] and [1] style annotations
+    logger.info(f"Text after cleaning annotations: {text}")
 
-    # Split text into sentences (simple split by period for now)
-    sentences = [s.strip() + '.' for s in text.split('.') if s.strip()]
+    # Split text into sentences (improved splitting)
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+    logger.info(f"Number of sentences found: {len(sentences)}")
+    logger.info(f"Sentences: {sentences}")
     
     # Keep track of all triplets and accumulated text for coref resolution
     all_triplets = []
     accumulated_text = ""
     
     # Process each sentence
-    with StanfordOpenIE(properties=properties) as client:
-        for i, sentence in enumerate(sentences, 1):
-            print(f'\nProcessing sentence {i}/{len(sentences)}:', sentence)
-            
-            # Get triplets for current sentence
-            current_triplets = client.annotate(sentence)
-            if not current_triplets:
-                print('No triplets found in this sentence')
-                continue
-                
-            # Update accumulated text
-            accumulated_text += " " + sentence
-            
-            # Check for pronouns in current triplets
-            pronouns_to_resolve = get_pronouns_from_triplets(current_triplets)
-            
-            if pronouns_to_resolve:
-                print('Pronouns found in triplets:', pronouns_to_resolve)
-                # Use all accumulated text for coref resolution
-                preds = model.predict(texts=[accumulated_text])
-                clusters = preds[0].get_clusters()
-                
-                # Resolve triplets using full context
-                resolved_current = [resolve_triplet(triple, clusters, pronouns_to_resolve, accumulated_text) 
-                                 for triple in current_triplets]
+    try:
+        logger.info("Attempting to connect to CoreNLP server...")
+        # Add connection retry logic
+        max_retries = 3
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                # CoreNLP server properties
+                properties = {
+                    'annotators': 'tokenize,ssplit,pos,lemma,depparse,natlog,coref,openie',
+                    'outputFormat': 'json',
+                    'openie.affinity_probability_cap': '0.67',
+                    'openie.resolve_coref': 'true'
+                }
+
+                # CoreNLP server URL
+                url = 'http://corenlp:9000'
+
+                for i, sentence in enumerate(sentences, 1):
+                    logger.info(f'\nProcessing sentence {i}/{len(sentences)}: {sentence}')
+                    try:
+                        # Send request to CoreNLP server
+                        response = requests.post(
+                            f'{url}/?properties={json.dumps(properties)}',
+                            data=sentence.encode('utf-8'),
+                            headers={'Content-Type': 'text/plain; charset=utf-8'}
+                        )
+                        response.raise_for_status()
+                        
+                        # Parse response and extract triplets
+                        current_triplets = extract_triplets_from_corenlp_response(response.json())
+                        
+                        if not current_triplets:
+                            logger.info('No triplets found in this sentence')
+                            continue
+                        
+                        # Update accumulated text
+                        accumulated_text += " " + sentence
+                        
+                        # Check for pronouns in current triplets
+                        pronouns_to_resolve = get_pronouns_from_triplets(current_triplets)
+                        
+                        if pronouns_to_resolve:
+                            logger.info(f'Pronouns found in triplets: {pronouns_to_resolve}')
+                            # Use all accumulated text for coref resolution
+                            preds = model.predict(texts=[accumulated_text])
+                            clusters = preds[0].get_clusters()
+                            
+                            # Resolve triplets using full context
+                            resolved_current = [resolve_triplet(triple, clusters, pronouns_to_resolve, accumulated_text) 
+                                             for triple in current_triplets]
+                        else:
+                            logger.info('No pronouns to resolve in this sentence')
+                            resolved_current = current_triplets
+                        
+                        # Add resolved triplets to our collection
+                        all_triplets.extend(resolved_current)
+                    except Exception as e:
+                        logger.error(f"Error processing sentence {i}: {str(e)}")
+                        continue
+                break  # If we get here, connection was successful
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Connection attempt {retry_count} failed: {str(e)}")
+                if retry_count < max_retries:
+                    logger.info(f"Retrying connection in 5 seconds...")
+                    time.sleep(5)
+                else:
+                    logger.error("Failed to connect to CoreNLP server after maximum retries")
+                    return []
+    except Exception as e:
+        logger.error(f"Error in CoreNLP processing: {str(e)}")
+        logger.error("Please ensure the CoreNLP server is running and accessible")
+        return []
+        
+    # Remove initial duplicates
+    deduped_triplets = remove_duplicate_triplets(all_triplets)
+    
+    # Consolidate similar entities and lemmatize
+    logger.info('\nConsolidating similar entities and lemmatizing...')
+    lemmatized_triplets = consolidate_and_lemmatize_triplets(deduped_triplets)
+    
+    logger.info('\nLemmatized triplets after duplicate removal:')
+    for triple in lemmatized_triplets:
+        logger.info('|-', {
+            'subject': triple['subject'],
+            'relation': triple['relation'],
+            'object': triple['object'],
+            'strength': triple.get('strength', 1.0)
+        })
+
+    # Add default strength to each triplet if not present
+    for triplet in lemmatized_triplets:
+        if 'strength' not in triplet:
+            triplet['strength'] = 1.0
+
+    logger.info(f'\nOriginal Text: {text}')
+    logger.info('\nFinal lemmatized triplets:')
+    for triple in lemmatized_triplets:
+        logger.info(f'|- {triple}')
+
+    # After getting the final lemmatized triplets, build and save to Neo4j
+    try:
+        # Build knowledge graph with embeddings
+        text_kg = OpenIEKnowledgeGraph()
+        text_kg.build_knowledge_graph(lemmatized_triplets)
+        
+        # Connect to Neo4j and create knowledge graph with embeddings
+        logger.info("Creating knowledge graph in Neo4j...")
+        neo4j = Neo4jConnector()
+        neo4j.clear_database()
+        neo4j.create_knowledge_graph(text_kg)
+        neo4j.close()
+        logger.info("Successfully saved knowledge graph to Neo4j")
+    except Exception as e:
+        logger.error(f"Error saving to Neo4j: {str(e)}")
+    
+    # Return the lemmatized triplets directly
+    return lemmatized_triplets
+
+async def process_text_from_url(url: str) -> str:
+    """Fetch text content from URL and save to temporary file for processing."""
+    try:
+        logger.info(f"Attempting to fetch content from: {url}")
+        
+        # Handle Google Drive URLs
+        if 'drive.google.com' in url:
+            # Check if it's already in the correct format
+            if 'export=download' in url:
+                file_id = url.split('id=')[1].split('&')[0] if 'id=' in url else None
             else:
-                print('No pronouns to resolve in this sentence')
-                resolved_current = current_triplets
+                # Try to extract file ID from sharing URL
+                try:
+                    file_id = url.split('/d/')[1].split('/')[0]
+                except IndexError:
+                    file_id = None
             
-            # Add resolved triplets to our collection
-            all_triplets.extend(resolved_current)
+            if file_id:
+                # Use the direct download URL
+                url = f"https://drive.google.com/uc?export=download&id={file_id}"
+                logger.info(f"Converted to Google Drive direct URL: {url}")
+            else:
+                logger.warning("Could not extract file ID from Google Drive URL")
         
-        # Remove initial duplicates
-        deduped_triplets = remove_duplicate_triplets(all_triplets)
+        response = requests.get(url, timeout=30)  # Add timeout
+        response.raise_for_status()
         
-        # Consolidate similar entities and lemmatize
-        print('\nConsolidating similar entities and lemmatizing...')
-        lemmatized_triplets = consolidate_and_lemmatize_triplets(deduped_triplets)
+        logger.info(f"Successfully fetched content, size: {len(response.text)} bytes")
         
-        print('\nLemmatized triplets after duplicate removal:')
-        for triple in lemmatized_triplets:
-            print('|-', {
-                'subject': triple['subject'],
-                'relation': triple['relation'],
-                'object': triple['object'],
-                'strength': triple.get('strength', 1.0)
-            })
+        # Create a temporary file
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as temp_file:
+            temp_file.write(response.text)
+            temp_path = temp_file.name
+            logger.info(f"Content saved to temporary file: {temp_path}")
+            
+        return temp_path
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="Request timed out while fetching the URL")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch text from URL: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-        # Add default strength to each triplet if not present
-        for triplet in lemmatized_triplets:
-            if 'strength' not in triplet:
-                triplet['strength'] = 1.0
+async def process_and_create_knowledge_graph(text_url: str):
+    """Process text and create knowledge graph in Neo4j."""
+    temp_file_path = None
+    neo4j = None
+    
+    try:
+        # Fetch text from URL and save to temporary file
+        logger.info("Fetching text from URL...")
+        temp_file_path = await process_text_from_url(text_url)
+        
+        # Process text file and get triplets
+        logger.info("Processing text content...")
+        triplets = process_text_file(temp_file_path)
+        
+        # Build knowledge graph with embeddings
+        text_kg = OpenIEKnowledgeGraph()
+        text_kg.build_knowledge_graph(triplets)
+        
+        # Connect to Neo4j and create knowledge graph
+        logger.info("Creating knowledge graph in Neo4j...")
+        neo4j = Neo4jConnector()
+        neo4j.clear_database()
+        neo4j.create_knowledge_graph(text_kg)
+        
+        return {
+            "status": "success",
+            "message": "Knowledge graph created successfully!",
+            "triplets_count": len(triplets),
+            "nodes_count": len(text_kg.G.nodes()),
+            "relationships_count": len(text_kg.G.edges())
+        }
+            
+    except Exception as e:
+        logger.error(f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Clean up
+        if neo4j:
+            neo4j.close()
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.unlink(temp_file_path)  # Delete temporary file
 
-        print('\nOriginal Text:', text)
-        print('\nFinal lemmatized triplets:')
-        for triple in lemmatized_triplets:
-            print('|-', triple)
-
-        # Return the lemmatized triplets directly
-        return lemmatized_triplets
+@app.post("/create-knowledge-graph")
+async def create_knowledge_graph(request: KnowledgeGraphRequest):
+    """API endpoint to create a knowledge graph from text URL."""
+    return await process_and_create_knowledge_graph(str(request.text_url))
 
 def main():
     # Example usage with default text file
     process_text_file('textFiles/text1.txt')
 
 if __name__ == '__main__':
-    main()
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)  # Changed from 8001 to 8000 to match docker-compose

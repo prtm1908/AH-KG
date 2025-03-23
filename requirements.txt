@@ -1,14 +1,19 @@
-spacy
+spacy==3.7.2
 stanford-openie
 fastcoref
 networkx
 matplotlib
-# pygraphviz
+pygraphviz
 Pillow
-numpy
+numpy<2.0
 neo4j
 torch
 torch-geometric
 scikit-learn
 nltk
 lemminflect
+fastapi
+uvicorn
+cython<3.0
+wheel
+setuptools
