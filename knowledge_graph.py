@@ -542,11 +542,9 @@ def process_text_file(file_path: str):
     # Read original text
     with open(file_path, encoding='utf8') as f:
         text = f.read()
-    logger.info(f"Original text read from file: {text}")
     
     # Clean the text - remove special annotations and normalize
     text = re.sub(r'\[nb \d+\]|\[\d+\]', '', text)  # Remove [nb 1] and [1] style annotations
-    logger.info(f"Text after cleaning annotations: {text}")
 
     # Split text into sentences (improved splitting)
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
@@ -654,7 +652,6 @@ def process_text_file(file_path: str):
         if 'strength' not in triplet:
             triplet['strength'] = 1.0
 
-    logger.info(f'\nOriginal Text: {text}')
     logger.info('\nFinal lemmatized triplets:')
     for triple in lemmatized_triplets:
         logger.info(f'|- {triple}')
