@@ -549,7 +549,6 @@ def process_text_file(file_path: str):
     # Split text into sentences (improved splitting)
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
     logger.info(f"Number of sentences found: {len(sentences)}")
-    logger.info(f"Sentences: {sentences}")
     
     # Keep track of all triplets and accumulated text for coref resolution
     all_triplets = []

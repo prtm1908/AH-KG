@@ -5,9 +5,10 @@ services:
     image: nlpbox/corenlp
     platform: linux/amd64
     environment:
-      - JAVA_XMX=4g
+      - JAVA_XMX=32g
     ports:
       - "9000:9000"
+    restart: unless-stopped
 
   app:
     build: 
