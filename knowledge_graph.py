@@ -94,12 +94,6 @@ class OpenIEKnowledgeGraph:
                 subject = triplet['subject']
                 relation = triplet['relation']
                 obj = triplet['object']
-                
-                # Skip triplets with empty strings
-                if not subject or not relation or not obj:
-                    self.logger.warning(f"Skipping invalid triplet with empty values: {triplet}")
-                    continue
-                
                 strength = triplet.get('strength', 1.0)  # Default strength is 1.0
                 
                 # Get original forms if available
@@ -429,18 +423,12 @@ def consolidate_all_entities_and_relations(triplets):
 
 def consolidate_and_lemmatize_triplets(triplets):
     """Consolidate similar entities and relations, then lemmatize all entities in triplets."""
-    # Skip invalid triplets before processing
-    valid_triplets = [t for t in triplets if t['subject'] and t['relation'] and t['object']]
-    
-    if not valid_triplets:
-        return []
-        
     # First consolidate all entities and relations together
-    entity_mapping, relation_mapping = consolidate_all_entities_and_relations(valid_triplets)
+    entity_mapping, relation_mapping = consolidate_all_entities_and_relations(triplets)
     
     # Convert triplets to raw format for lemmatization
     raw_triplets = []
-    for triplet in valid_triplets:
+    for triplet in triplets:
         # Store original forms
         original_subject = triplet['subject']
         original_object = triplet['object']
@@ -462,8 +450,8 @@ def consolidate_and_lemmatize_triplets(triplets):
             'subject': lemmatized['subject'],
             'relation': lemmatized['relationship'],
             'object': lemmatized['object'],
-            'original_subject': valid_triplets[i]['subject'],
-            'original_object': valid_triplets[i]['object'],
+            'original_subject': triplets[i]['subject'],
+            'original_object': triplets[i]['object'],
             'metadata': lemmatized['metadata']
         }
         consolidated_triplets.append(new_triplet)
@@ -517,14 +505,10 @@ def extract_triplets_from_corenlp_response(response_json):
     for sentence in response_json['sentences']:
         if 'openie' in sentence:
             for triple in sentence['openie']:
-                # Skip if any required field is empty
-                if not triple['subject'].strip() or not triple['relation'].strip() or not triple['object'].strip():
-                    continue
-                    
                 triplet = {
-                    'subject': triple['subject'].strip(),
-                    'relation': triple['relation'].strip(),
-                    'object': triple['object'].strip(),
+                    'subject': triple['subject'],
+                    'relation': triple['relation'],
+                    'object': triple['object'],
                     'strength': 1.0  # Default strength
                 }
                 triplets.append(triplet)
