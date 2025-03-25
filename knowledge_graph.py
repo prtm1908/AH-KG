@@ -40,12 +40,10 @@ class OpenIEKnowledgeGraph:
         """Initialize the NetworkX graph and set up logging."""
         self.G = nx.MultiDiGraph()  # Using MultiDiGraph to allow multiple relationships between same nodes
         self.logger = logging.getLogger(__name__)
-        self.node_embeddings = None  # Store node embeddings
 
     def clear_graph(self):
         """Remove all nodes and relationships from the graph."""
         self.G.clear()
-        self.node_embeddings = None
         self.logger.info("Graph cleared")
 
     def create_entity_node(self, entity: str):
@@ -88,8 +86,8 @@ class OpenIEKnowledgeGraph:
             raise
 
     def build_knowledge_graph(self, triplets: List[Dict]):
-        """Build the knowledge graph from OpenIE triplets and generate GraphSAGE embeddings."""
-        # First build the graph structure
+        """Build the knowledge graph from OpenIE triplets."""
+        # Build the graph structure
         for triplet in triplets:
             try:
                 # Get both lemmatized and original forms
@@ -128,18 +126,8 @@ class OpenIEKnowledgeGraph:
                 self.logger.error(f"Error processing triplet: {triplet}")
                 self.logger.error(str(e))
                 continue
-
-        # Generate GraphSAGE embeddings for all nodes
-        self.logger.info("Generating GraphSAGE embeddings...")
-        self.node_embeddings = generate_graphsage_embeddings(triplets)
         
-        # Add embeddings as node attributes
-        for node in self.G.nodes():
-            node_name = self.G.nodes[node]['name']
-            if node_name in self.node_embeddings:
-                self.G.nodes[node]['embedding'] = self.node_embeddings[node_name]
-        
-        self.logger.info("Knowledge graph built successfully with embeddings")
+        self.logger.info("Knowledge graph built successfully")
 
 class Neo4jConnector:
     def __init__(self, uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD):
@@ -173,10 +161,6 @@ class Neo4jConnector:
                     'text': node_data['name'],
                     'caption': node_data['name']
                 }
-                
-                # Add embedding if available
-                if 'embedding' in node_data:
-                    node_props['embedding'] = node_data['embedding']
                 
                 cypher_query = f"""
                 MERGE (n:{label} {{name: $name}})
