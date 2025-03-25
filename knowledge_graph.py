@@ -526,18 +526,21 @@ def process_text_file(file_path: str):
         file_path (str): Path to the text file to process
         
     Returns:
-        list: List of triplets extracted from the text
+        int: Total number of triplets processed
     """
     # If file_path is a URL, download it first
     if file_path.startswith('http'):
         temp_file = 'temp_text.txt'
         if not download_and_save_text(file_path, temp_file):
             logger.error("Failed to download text from URL")
-            return []
+            return 0
         file_path = temp_file
 
-    # Initialize models
+    # Initialize models and connections
     model = fastcoref.FCoref()
+    text_kg = OpenIEKnowledgeGraph()
+    neo4j = Neo4jConnector()
+    neo4j.clear_database()  # Clear at start
 
     # Read original text
     with open(file_path, encoding='utf8') as f:
@@ -546,133 +549,109 @@ def process_text_file(file_path: str):
     # Clean the text - remove special annotations and normalize
     text = re.sub(r'\[nb \d+\]|\[\d+\]', '', text)  # Remove [nb 1] and [1] style annotations
 
-    # Split text into sentences (improved splitting)
+    # Split text into sentences
     sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
     logger.info(f"Number of sentences found: {len(sentences)}")
     
-    # Keep track of all triplets and accumulated text for coref resolution
-    all_triplets = []
-    accumulated_text = ""
+    # Process in batches
+    batch_size = 100  # Process 100 sentences at a time
+    total_triplets_processed = 0
     
-    # Process each sentence
     try:
-        logger.info("Attempting to connect to CoreNLP server...")
-        # Add connection retry logic
-        max_retries = 3
-        retry_count = 0
-        while retry_count < max_retries:
-            try:
-                # CoreNLP server properties
-                properties = {
-                    'annotators': 'tokenize,ssplit,pos,lemma,depparse,natlog,coref,openie',
-                    'outputFormat': 'json',
-                    'openie.affinity_probability_cap': '0.67',
-                    'openie.resolve_coref': 'true'
-                }
-
-                # CoreNLP server URL
-                url = 'http://corenlp:9000'
-
-                for i, sentence in enumerate(sentences, 1):
-                    logger.info(f'\nProcessing sentence {i}/{len(sentences)}: {sentence}')
-                    try:
-                        # Send request to CoreNLP server
-                        response = requests.post(
-                            f'{url}/?properties={json.dumps(properties)}',
-                            data=sentence.encode('utf-8'),
-                            headers={'Content-Type': 'text/plain; charset=utf-8'}
-                        )
-                        response.raise_for_status()
-                        
-                        # Parse response and extract triplets
-                        current_triplets = extract_triplets_from_corenlp_response(response.json())
-                        
-                        if not current_triplets:
-                            logger.info('No triplets found in this sentence')
-                            continue
-                        
-                        # Update accumulated text
-                        accumulated_text += " " + sentence
-                        
-                        # Check for pronouns in current triplets
-                        pronouns_to_resolve = get_pronouns_from_triplets(current_triplets)
-                        
-                        if pronouns_to_resolve:
-                            logger.info(f'Pronouns found in triplets: {pronouns_to_resolve}')
-                            # Use all accumulated text for coref resolution
-                            preds = model.predict(texts=[accumulated_text])
-                            clusters = preds[0].get_clusters()
-                            
-                            # Resolve triplets using full context
-                            resolved_current = [resolve_triplet(triple, clusters, pronouns_to_resolve, accumulated_text) 
-                                             for triple in current_triplets]
-                        else:
-                            logger.info('No pronouns to resolve in this sentence')
-                            resolved_current = current_triplets
-                        
-                        # Add resolved triplets to our collection
-                        all_triplets.extend(resolved_current)
-                    except Exception as e:
-                        logger.error(f"Error processing sentence {i}: {str(e)}")
+        for batch_start in range(0, len(sentences), batch_size):
+            batch_end = min(batch_start + batch_size, len(sentences))
+            batch_sentences = sentences[batch_start:batch_end]
+            logger.info(f"\nProcessing batch of sentences {batch_start+1} to {batch_end}")
+            
+            # Initialize batch variables
+            batch_triplets = []
+            context_sentences = []  # Keep track of context sentences
+            
+            # Process each sentence in the batch sequentially
+            for i, sentence in enumerate(batch_sentences, batch_start + 1):
+                try:
+                    logger.info(f'Processing sentence {i}/{len(sentences)}: {sentence[:100]}...')
+                    
+                    # Add current sentence to context
+                    context_sentences.append(sentence)
+                    current_context = " ".join(context_sentences)  # Use all previous sentences in batch as context
+                    
+                    # Send request to CoreNLP server
+                    response = requests.post(
+                        'http://corenlp:9000/?properties=' + 
+                        json.dumps({
+                            'annotators': 'tokenize,ssplit,pos,lemma,depparse,natlog,coref,openie',
+                            'outputFormat': 'json',
+                            'openie.affinity_probability_cap': '0.67',
+                            'openie.resolve_coref': 'true'
+                        }),
+                        data=sentence.encode('utf-8'),
+                        headers={'Content-Type': 'text/plain; charset=utf-8'}
+                    )
+                    response.raise_for_status()
+                    
+                    # Extract triplets
+                    current_triplets = extract_triplets_from_corenlp_response(response.json())
+                    
+                    if not current_triplets:
                         continue
-                break  # If we get here, connection was successful
-            except Exception as e:
-                retry_count += 1
-                logger.error(f"Connection attempt {retry_count} failed: {str(e)}")
-                if retry_count < max_retries:
-                    logger.info(f"Retrying connection in 5 seconds...")
-                    time.sleep(5)
-                else:
-                    logger.error("Failed to connect to CoreNLP server after maximum retries")
-                    return []
+                    
+                    # Resolve coreferences if needed using context
+                    pronouns_to_resolve = get_pronouns_from_triplets(current_triplets)
+                    if pronouns_to_resolve:
+                        # Use all previous sentences in batch as context for coreference resolution
+                        preds = model.predict(texts=[current_context])
+                        clusters = preds[0].get_clusters()
+                        current_triplets = [resolve_triplet(triple, clusters, pronouns_to_resolve, current_context) 
+                                         for triple in current_triplets]
+                    
+                    batch_triplets.extend(current_triplets)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing sentence {i}: {str(e)}")
+                    continue
+            
+            if batch_triplets:
+                # Process the batch of triplets
+                logger.info(f"Processing batch of {len(batch_triplets)} triplets")
+                
+                # Remove duplicates within this batch
+                deduped_batch = remove_duplicate_triplets(batch_triplets)
+                
+                # Consolidate and lemmatize the batch
+                processed_batch = consolidate_and_lemmatize_triplets(deduped_batch)
+                
+                # Add default strength if not present
+                for triplet in processed_batch:
+                    if 'strength' not in triplet:
+                        triplet['strength'] = 1.0
+                
+                # Update knowledge graph with this batch
+                text_kg.build_knowledge_graph(processed_batch)
+                
+                # Save this batch to Neo4j
+                neo4j.create_knowledge_graph(text_kg)
+                
+                # Clear the graph for next batch
+                text_kg.clear_graph()
+                
+                # Update total and clear batch variables
+                total_triplets_processed += len(processed_batch)
+                logger.info(f"Processed and saved {len(processed_batch)} triplets from this batch")
+                logger.info(f"Total triplets processed so far: {total_triplets_processed}")
+                
+                # Clear batch variables to free memory
+                batch_triplets = []
+                processed_batch = []
+                deduped_batch = []
+                context_sentences = []  # Clear context for next batch
+            
     except Exception as e:
-        logger.error(f"Error in CoreNLP processing: {str(e)}")
-        logger.error("Please ensure the CoreNLP server is running and accessible")
-        return []
-        
-    # Remove initial duplicates
-    deduped_triplets = remove_duplicate_triplets(all_triplets)
-    
-    # Consolidate similar entities and lemmatize
-    logger.info('\nConsolidating similar entities and lemmatizing...')
-    lemmatized_triplets = consolidate_and_lemmatize_triplets(deduped_triplets)
-    
-    logger.info('\nLemmatized triplets after duplicate removal:')
-    for triple in lemmatized_triplets:
-        logger.info('|-', {
-            'subject': triple['subject'],
-            'relation': triple['relation'],
-            'object': triple['object'],
-            'strength': triple.get('strength', 1.0)
-        })
-
-    # Add default strength to each triplet if not present
-    for triplet in lemmatized_triplets:
-        if 'strength' not in triplet:
-            triplet['strength'] = 1.0
-
-    logger.info('\nFinal lemmatized triplets:')
-    for triple in lemmatized_triplets:
-        logger.info(f'|- {triple}')
-
-    # After getting the final lemmatized triplets, build and save to Neo4j
-    try:
-        # Build knowledge graph with embeddings
-        text_kg = OpenIEKnowledgeGraph()
-        text_kg.build_knowledge_graph(lemmatized_triplets)
-        
-        # Connect to Neo4j and create knowledge graph with embeddings
-        logger.info("Creating knowledge graph in Neo4j...")
-        neo4j = Neo4jConnector()
-        neo4j.clear_database()
-        neo4j.create_knowledge_graph(text_kg)
+        logger.error(f"Error in batch processing: {str(e)}")
+    finally:
         neo4j.close()
-        logger.info("Successfully saved knowledge graph to Neo4j")
-    except Exception as e:
-        logger.error(f"Error saving to Neo4j: {str(e)}")
     
-    # Return the lemmatized triplets directly
-    return lemmatized_triplets
+    return total_triplets_processed
 
 async def process_text_from_url(url: str) -> str:
     """Fetch text content from URL and save to temporary file for processing."""
@@ -729,13 +708,13 @@ async def process_and_create_knowledge_graph(text_url: str):
         
         # Process text file and get triplets
         logger.info("Processing text content...")
-        triplets = process_text_file(temp_file_path)
+        triplets_processed = process_text_file(temp_file_path)
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
-        text_kg.build_knowledge_graph(triplets)
+        text_kg.build_knowledge_graph(triplets_processed)
         
-        # Connect to Neo4j and create knowledge graph
+        # Connect to Neo4j and create knowledge graph with embeddings
         logger.info("Creating knowledge graph in Neo4j...")
         neo4j = Neo4jConnector()
         neo4j.clear_database()
@@ -744,7 +723,7 @@ async def process_and_create_knowledge_graph(text_url: str):
         return {
             "status": "success",
             "message": "Knowledge graph created successfully!",
-            "triplets_count": len(triplets),
+            "triplets_count": triplets_processed,
             "nodes_count": len(text_kg.G.nodes()),
             "relationships_count": len(text_kg.G.edges())
         }
