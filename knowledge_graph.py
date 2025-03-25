@@ -94,6 +94,12 @@ class OpenIEKnowledgeGraph:
                 subject = triplet['subject']
                 relation = triplet['relation']
                 obj = triplet['object']
+                
+                # Skip triplets with empty strings
+                if not subject or not relation or not obj:
+                    self.logger.warning(f"Skipping invalid triplet with empty values: {triplet}")
+                    continue
+                
                 strength = triplet.get('strength', 1.0)  # Default strength is 1.0
                 
                 # Get original forms if available
@@ -150,10 +156,15 @@ class Neo4jConnector:
             for node in text_kg.G.nodes():
                 node_data = text_kg.G.nodes[node]
                 
-                # Convert entity to valid label name (remove spaces and special chars)
-                label = node_data['name'].replace(' ', '_').replace('-', '_').upper()
+                # Convert entity to valid label name (remove spaces, dots, and special chars)
+                label = re.sub(r'[^A-Za-z0-9_]', '_', node_data['name'].upper())
+                # Ensure label starts with a letter
                 if not label[0].isalpha():
                     label = 'E_' + label
+                # Remove consecutive underscores
+                label = re.sub(r'_+', '_', label)
+                # Remove trailing underscore
+                label = label.rstrip('_')
                 
                 # Prepare node properties
                 node_props = {
@@ -171,7 +182,14 @@ class Neo4jConnector:
             # Create relationships
             for u, v, data in text_kg.G.edges(data=True):
                 # Convert relation to valid Neo4j identifier
-                rel_type = data['relation'].upper().replace(' ', '_').replace('-', '_')
+                rel_type = re.sub(r'[^A-Za-z0-9_]', '_', data['relation'].upper())
+                # Ensure relationship type starts with a letter
+                if not rel_type[0].isalpha():
+                    rel_type = 'REL_' + rel_type
+                # Remove consecutive underscores
+                rel_type = re.sub(r'_+', '_', rel_type)
+                # Remove trailing underscore
+                rel_type = rel_type.rstrip('_')
                 
                 cypher_query = f"""
                 MATCH (s {{name: $subject}})
@@ -411,12 +429,18 @@ def consolidate_all_entities_and_relations(triplets):
 
 def consolidate_and_lemmatize_triplets(triplets):
     """Consolidate similar entities and relations, then lemmatize all entities in triplets."""
+    # Skip invalid triplets before processing
+    valid_triplets = [t for t in triplets if t['subject'] and t['relation'] and t['object']]
+    
+    if not valid_triplets:
+        return []
+        
     # First consolidate all entities and relations together
-    entity_mapping, relation_mapping = consolidate_all_entities_and_relations(triplets)
+    entity_mapping, relation_mapping = consolidate_all_entities_and_relations(valid_triplets)
     
     # Convert triplets to raw format for lemmatization
     raw_triplets = []
-    for triplet in triplets:
+    for triplet in valid_triplets:
         # Store original forms
         original_subject = triplet['subject']
         original_object = triplet['object']
@@ -438,8 +462,8 @@ def consolidate_and_lemmatize_triplets(triplets):
             'subject': lemmatized['subject'],
             'relation': lemmatized['relationship'],
             'object': lemmatized['object'],
-            'original_subject': triplets[i]['subject'],
-            'original_object': triplets[i]['object'],
+            'original_subject': valid_triplets[i]['subject'],
+            'original_object': valid_triplets[i]['object'],
             'metadata': lemmatized['metadata']
         }
         consolidated_triplets.append(new_triplet)
@@ -493,10 +517,14 @@ def extract_triplets_from_corenlp_response(response_json):
     for sentence in response_json['sentences']:
         if 'openie' in sentence:
             for triple in sentence['openie']:
+                # Skip if any required field is empty
+                if not triple['subject'].strip() or not triple['relation'].strip() or not triple['object'].strip():
+                    continue
+                    
                 triplet = {
-                    'subject': triple['subject'],
-                    'relation': triple['relation'],
-                    'object': triple['object'],
+                    'subject': triple['subject'].strip(),
+                    'relation': triple['relation'].strip(),
+                    'object': triple['object'].strip(),
                     'strength': 1.0  # Default strength
                 }
                 triplets.append(triplet)
@@ -683,44 +711,29 @@ async def process_text_from_url(url: str) -> str:
 async def process_and_create_knowledge_graph(text_url: str):
     """Process text and create knowledge graph in Neo4j."""
     temp_file_path = None
-    neo4j = None
     
     try:
         # Fetch text from URL and save to temporary file
         logger.info("Fetching text from URL...")
         temp_file_path = await process_text_from_url(text_url)
         
-        # Process text file and get triplets
+        # Process text file and get triplets count
         logger.info("Processing text content...")
-        triplets_processed = process_text_file(temp_file_path)
-        
-        # Build knowledge graph with embeddings
-        text_kg = OpenIEKnowledgeGraph()
-        text_kg.build_knowledge_graph(triplets_processed)
-        
-        # Connect to Neo4j and create knowledge graph with embeddings
-        logger.info("Creating knowledge graph in Neo4j...")
-        neo4j = Neo4jConnector()
-        neo4j.clear_database()
-        neo4j.create_knowledge_graph(text_kg)
+        total_triplets = process_text_file(temp_file_path)
         
         return {
             "status": "success",
             "message": "Knowledge graph created successfully!",
-            "triplets_count": triplets_processed,
-            "nodes_count": len(text_kg.G.nodes()),
-            "relationships_count": len(text_kg.G.edges())
+            "triplets_processed": total_triplets
         }
             
     except Exception as e:
         logger.error(f"An error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up
-        if neo4j:
-            neo4j.close()
+        # Clean up temporary file
         if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)  # Delete temporary file
+            os.unlink(temp_file_path)
 
 @app.post("/create-knowledge-graph")
 async def create_knowledge_graph(request: KnowledgeGraphRequest):
