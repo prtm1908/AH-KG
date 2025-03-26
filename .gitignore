@@ -7,3 +7,4 @@ graphCoref.png
 QA_dataset_with_triplets.csv
 
 .env
+.vscode

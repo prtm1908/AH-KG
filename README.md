@@ -41,19 +41,36 @@ The API will be available at:
 
 ### 1. Create Knowledge Graph
 ```bash
+# Using URL
 curl -X POST "http://localhost:8000/create-knowledge-graph" \
      -H "Content-Type: application/json" \
      -d '{
            "text_url": "https://example.com/text.txt"
          }'
+
+# Using local file
+curl -X POST "http://localhost:8000/create-knowledge-graph" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "file_path": "/path/to/your/text.txt"
+         }'
 ```
 
 ### 2. Visualize Knowledge Graph
 ```bash
+# Using URL
 curl -X POST "http://localhost:8000/visualize" \
      -H "Content-Type: application/json" \
      -d '{
            "text_url": "https://example.com/text.txt",
+           "query": "your search query"
+         }'
+
+# Using local file
+curl -X POST "http://localhost:8000/visualize" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "file_path": "/path/to/your/text.txt",
            "query": "your search query"
          }'
 ```

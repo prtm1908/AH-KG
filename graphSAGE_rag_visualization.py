@@ -27,11 +27,23 @@ app = FastAPI(title="Knowledge Graph API")
 
 # Define request models
 class VisualizationRequest(BaseModel):
-    text_url: HttpUrl
+    text_url: HttpUrl | None = None
+    file_path: str | None = None
     query: str
 
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.text_url and not self.file_path:
+            raise ValueError("Either text_url or file_path must be provided")
+
 class KnowledgeGraphRequest(BaseModel):
-    text_url: HttpUrl
+    text_url: HttpUrl | None = None
+    file_path: str | None = None
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        if not self.text_url and not self.file_path:
+            raise ValueError("Either text_url or file_path must be provided")
 
 def plot_networkx_graph(triplets, title="Knowledge Graph"):
     """Plot knowledge graph using NetworkX."""
@@ -124,18 +136,26 @@ async def process_text_from_url(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-async def process_and_visualize(text_url: str, query: str):
+async def process_and_visualize(text_url: str | None = None, file_path: str | None = None, query: str = None):
     """Process text and create visualizations."""
     temp_file_path = None
     
     try:
-        # Fetch text from URL and save to temporary file
-        logger.info("Fetching text from URL...")
-        temp_file_path = await process_text_from_url(text_url)
+        if text_url:
+            # Fetch text from URL and save to temporary file
+            logger.info("Fetching text from URL...")
+            temp_file_path = await process_text_from_url(text_url)
+            file_to_process = temp_file_path
+        else:
+            # Use the provided file path
+            logger.info(f"Using local file path: {file_path}")
+            if not os.path.exists(file_path):
+                raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+            file_to_process = file_path
         
         # Process text file and get triplets
         logger.info("Processing text content...")
-        triplets = process_text_file(temp_file_path)
+        triplets = process_text_file(file_to_process)
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
@@ -175,28 +195,40 @@ async def process_and_visualize(text_url: str, query: str):
         logger.error(f"An error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up
+        # Clean up temporary file only if it was created from URL
         if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)  # Delete temporary file
+            os.unlink(temp_file_path)
 
 @app.post("/visualize")
 async def create_visualization(request: VisualizationRequest):
     """API endpoint to create knowledge graph visualizations."""
-    return await process_and_visualize(str(request.text_url), request.query)
+    return await process_and_visualize(
+        text_url=str(request.text_url) if request.text_url else None,
+        file_path=request.file_path,
+        query=request.query
+    )
 
 @app.post("/create-knowledge-graph")
 async def create_knowledge_graph(request: KnowledgeGraphRequest):
-    """API endpoint to create a knowledge graph from text URL."""
+    """API endpoint to create a knowledge graph from text URL or local file path."""
     temp_file_path = None
     
     try:
-        # Fetch text from URL and save to temporary file
-        logger.info("Fetching text from URL...")
-        temp_file_path = await process_text_from_url(str(request.text_url))
+        if request.text_url:
+            # Fetch text from URL and save to temporary file
+            logger.info("Fetching text from URL...")
+            temp_file_path = await process_text_from_url(str(request.text_url))
+            file_to_process = temp_file_path
+        else:
+            # Use the provided file path
+            logger.info(f"Using local file path: {request.file_path}")
+            if not os.path.exists(request.file_path):
+                raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
+            file_to_process = request.file_path
         
         # Process text file and get triplets
         logger.info("Processing text content...")
-        triplets = process_text_file(temp_file_path)
+        triplets = process_text_file(file_to_process)
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
@@ -214,9 +246,9 @@ async def create_knowledge_graph(request: KnowledgeGraphRequest):
         logger.error(f"An error occurred: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up
+        # Clean up temporary file only if it was created from URL
         if temp_file_path and os.path.exists(temp_file_path):
-            os.unlink(temp_file_path)  # Delete temporary file
+            os.unlink(temp_file_path)
 
 if __name__ == "__main__":
     import uvicorn
