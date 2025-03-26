@@ -109,33 +109,6 @@ def extract_relevant_triplets_from_entities(text_kg: OpenIEKnowledgeGraph, match
     
     return relevant_triplets
 
-def process_text_to_kg(text: str, kg: OpenIEKnowledgeGraph):
-    """Process text and build knowledge graph."""
-    # Create a temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as temp_file:
-        temp_file.write(text)
-        temp_path = temp_file.name
-    
-    try:
-        # Process the temporary file and get triplets
-        triplets = process_text_file(temp_path)
-        
-        if triplets:
-            # Build the knowledge graph from triplets
-            kg.clear_graph()
-            kg.build_knowledge_graph(triplets)
-            logger.info(f"Successfully built knowledge graph with {len(triplets)} triplets")
-            return True
-        
-        logger.warning("No triplets found in the text")
-        return False
-    except Exception as e:
-        logger.error(f"Error processing text: {str(e)}")
-        return False
-    finally:
-        # Clean up temporary file
-        os.unlink(temp_path)
-
 def knowledge_graph_rag(text_file_path: str, query: str):
     """
     Perform RAG using knowledge graphs.
@@ -148,16 +121,16 @@ def knowledge_graph_rag(text_file_path: str, query: str):
         list: List of relevant triplets
     """
     try:
-        # Read the text file
-        with open(text_file_path, 'r', encoding='utf-8') as f:
-            text_content = f.read()
-        
-        logger.info("Processing main text file...")
         # Process the main text and create its knowledge graph
+        logger.info("Processing main text file...")
         text_kg = OpenIEKnowledgeGraph()
-        if not process_text_to_kg(text_content, text_kg):
-            logger.error("Failed to process main text file")
+        triplets_count = process_text_file(text_file_path)
+        
+        if triplets_count == 0:
+            logger.error("Failed to process main text file - no triplets extracted")
             return []
+        
+        logger.info(f"Successfully processed text file with {triplets_count} triplets")
         
         logger.info("Extracting entities from query...")
         # Extract entities from query using spaCy

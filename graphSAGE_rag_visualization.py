@@ -154,13 +154,15 @@ async def process_and_visualize(text_url: Optional[str] = None, file_path: Optio
                 raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
             file_to_process = file_path
         
-        # Process text file and get triplets
+        # Process text file and get triplets count
         logger.info("Processing text content...")
-        triplets = process_text_file(file_to_process)
+        triplets_count = process_text_file(file_to_process)
+        
+        if triplets_count == 0:
+            raise HTTPException(status_code=400, detail="No triplets were extracted from the text")
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
-        text_kg.build_knowledge_graph(triplets)
         
         # Get relevant triplets using the existing knowledge graph
         logger.info("Processing query using RAG...")
@@ -170,7 +172,7 @@ async def process_and_visualize(text_url: Optional[str] = None, file_path: Optio
         
         # Plot the full knowledge graph using NetworkX
         logger.info("Plotting full knowledge graph...")
-        full_graph = plot_networkx_graph(triplets, "Full Knowledge Graph")
+        full_graph = plot_networkx_graph(relevant_triplets, "Full Knowledge Graph")
         full_graph.savefig('full_knowledge_graph.png', bbox_inches='tight', dpi=300)
         logger.info("Full knowledge graph saved as 'full_knowledge_graph.png'")
         plt.close()  # Close the full graph figure
@@ -189,7 +191,8 @@ async def process_and_visualize(text_url: Optional[str] = None, file_path: Optio
             "status": "success",
             "message": "Visualization complete!",
             "full_graph_path": "full_knowledge_graph.png",
-            "relevant_graph_path": "relevant_knowledge_graph.png" if relevant_triplets else None
+            "relevant_graph_path": "relevant_knowledge_graph.png" if relevant_triplets else None,
+            "triplets_count": triplets_count
         }
             
     except Exception as e:
@@ -227,18 +230,20 @@ async def create_knowledge_graph(request: KnowledgeGraphRequest):
                 raise HTTPException(status_code=404, detail=f"File not found: {request.file_path}")
             file_to_process = request.file_path
         
-        # Process text file and get triplets
+        # Process text file and get triplets count
         logger.info("Processing text content...")
-        triplets = process_text_file(file_to_process)
+        triplets_count = process_text_file(file_to_process)
+        
+        if triplets_count == 0:
+            raise HTTPException(status_code=400, detail="No triplets were extracted from the text")
         
         # Build knowledge graph with embeddings
         text_kg = OpenIEKnowledgeGraph()
-        text_kg.build_knowledge_graph(triplets)
         
         return {
             "status": "success",
             "message": "Knowledge graph created successfully!",
-            "triplets_count": len(triplets),
+            "triplets_count": triplets_count,
             "nodes_count": len(text_kg.G.nodes()),
             "relationships_count": len(text_kg.G.edges())
         }

@@ -96,6 +96,11 @@ class OpenIEKnowledgeGraph:
         # Build the graph structure
         for triplet in triplets:
             try:
+                # Skip triplets with empty subjects or objects
+                if not triplet['subject'].strip() or not triplet['object'].strip():
+                    self.logger.warning(f"Skipping triplet with empty subject or object: {triplet}")
+                    continue
+                
                 # Get both lemmatized and original forms
                 subject = triplet['subject']
                 relation = triplet['relation']
@@ -597,6 +602,9 @@ def process_text_file(file_path: str):
                     
                     if not current_triplets:
                         continue
+                    
+                    # Filter out triplets with empty subjects or objects
+                    current_triplets = [t for t in current_triplets if t['subject'].strip() and t['object'].strip()]
                     
                     # Resolve coreferences if needed using context
                     pronouns_to_resolve = get_pronouns_from_triplets(current_triplets)

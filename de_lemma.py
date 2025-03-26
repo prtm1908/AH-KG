@@ -68,6 +68,10 @@ def lemmatize_triplets(raw_triplets):
     processed = []
     
     for subj_raw, rel_raw, obj_raw in raw_triplets:
+        # Skip if any component is empty
+        if not subj_raw.strip() or not rel_raw.strip() or not obj_raw.strip():
+            continue
+            
         # Tokenize and convert tokens to lowercase for proper lemmatization.
         subj_tokens = subj_raw.split()
         subj_tokens_lower = [token.lower() for token in subj_tokens]
@@ -94,14 +98,29 @@ def lemmatize_triplets(raw_triplets):
         def lemmatize_tokens(pos_tags):
             lemmas = []
             for token, pos in pos_tags:
-                wn_pos = penn_to_wordnet(pos)
-                lemma = lemmatizer.lemmatize(token, pos=wn_pos)
-                lemmas.append(lemma)
+                try:
+                    wn_pos = penn_to_wordnet(pos)
+                    lemma = lemmatizer.lemmatize(token, pos=wn_pos)
+                    # If lemmatization resulted in empty string, use original token
+                    if not lemma.strip():
+                        lemma = token
+                    lemmas.append(lemma)
+                except Exception:
+                    # If lemmatization fails, use original token
+                    lemmas.append(token)
             return " ".join(lemmas)
         
         subj_lemma = lemmatize_tokens(subj_pos)
         rel_lemma  = lemmatize_tokens(rel_pos)
         obj_lemma  = lemmatize_tokens(obj_pos)
+        
+        # If lemmatization resulted in empty strings, use original forms
+        if not subj_lemma.strip():
+            subj_lemma = subj_raw
+        if not rel_lemma.strip():
+            rel_lemma = rel_raw
+        if not obj_lemma.strip():
+            obj_lemma = obj_raw
         
         processed.append({
             "subject": subj_lemma,
