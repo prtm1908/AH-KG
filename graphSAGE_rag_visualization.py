@@ -12,6 +12,7 @@ import logging
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, HttpUrl
+from typing import Optional
 import requests
 import tempfile
 
@@ -27,8 +28,8 @@ app = FastAPI(title="Knowledge Graph API")
 
 # Define request models
 class VisualizationRequest(BaseModel):
-    text_url: HttpUrl | None = None
-    file_path: str | None = None
+    text_url: Optional[HttpUrl] = None
+    file_path: Optional[str] = None
     query: str
 
     def __init__(self, **data):
@@ -37,8 +38,8 @@ class VisualizationRequest(BaseModel):
             raise ValueError("Either text_url or file_path must be provided")
 
 class KnowledgeGraphRequest(BaseModel):
-    text_url: HttpUrl | None = None
-    file_path: str | None = None
+    text_url: Optional[HttpUrl] = None
+    file_path: Optional[str] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -136,7 +137,7 @@ async def process_text_from_url(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-async def process_and_visualize(text_url: str | None = None, file_path: str | None = None, query: str = None):
+async def process_and_visualize(text_url: Optional[str] = None, file_path: Optional[str] = None, query: Optional[str] = None):
     """Process text and create visualizations."""
     temp_file_path = None
     

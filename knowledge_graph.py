@@ -2,7 +2,7 @@ import fastcoref
 import re
 import networkx as nx
 import logging
-from typing import List, Dict
+from typing import List, Dict, Union, Optional
 from collections import defaultdict
 from graphsage_embeddings import generate_graphsage_embeddings
 from de_lemma import lemmatize_triplets, de_lemmatize_triplets
@@ -28,8 +28,8 @@ app = FastAPI(title="Knowledge Graph Creation API")
 
 # Define request model
 class KnowledgeGraphRequest(BaseModel):
-    text_url: HttpUrl | None = None
-    file_path: str | None = None
+    text_url: Optional[HttpUrl] = None
+    file_path: Optional[str] = None
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -698,7 +698,7 @@ async def process_text_from_url(url: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
-async def process_and_create_knowledge_graph(text_url: str | None = None, file_path: str | None = None):
+async def process_and_create_knowledge_graph(text_url: Optional[str] = None, file_path: Optional[str] = None):
     """Process text and create knowledge graph in Neo4j."""
     temp_file_path = None
     
