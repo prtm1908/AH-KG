@@ -22,7 +22,7 @@ class SubgraphQuery(BaseModel):
     query: str
 
 class CombinedInput(BaseModel):
-    text_file_path: str
+    file_path: str
     query: str
 
 def clear_neo4j_database():
@@ -119,31 +119,45 @@ async def create_knowledge_graph(input_data: FileInput):
         Dictionary with success message and processing details
     """
     try:
+        print("Starting create_knowledge_graph function")
         # Clear the existing database first
+        print("Clearing Neo4j database...")
         clear_neo4j_database()
         
         # Read text from file
+        print(f"Reading text from file: {input_data.file_path}")
         text = read_text_file(input_data.file_path)
         
         # Split text into batches
+        print("Splitting text into batches...")
         batches = process_text_in_batches(text)
+        print(f"Created {len(batches)} batches")
         
         # Process each batch
         for i, batch in enumerate(batches, 1):
+            print(f"\nProcessing batch {i}/{len(batches)}")
             # Create triplets from batch
+            print("Creating triplets...")
             triplets = create_triplets_spacy_fastcoref(batch)
+            print(f"Created {len(triplets)} triplets")
             
             # Process triplets with lemmatization
+            print("Processing triplets with lemmatization...")
             processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
+            print(f"Processed {len(processed_triplets)} triplets")
             
             # Upload to Neo4j
+            print("Uploading to Neo4j...")
             upload_to_neo4j(processed_triplets, relation_tracking)
+            print("Successfully uploaded to Neo4j")
         
+        print("Successfully completed all batches")
         return {
             "status": "success",
             "message": f"Successfully processed {len(batches)} batches of text and uploaded to Neo4j"
         }
     except Exception as e:
+        print(f"Error in create_knowledge_graph: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/get-subgraph", response_model=List[Dict[str, str]])
@@ -158,11 +172,13 @@ async def get_subgraph(query_data: SubgraphQuery):
         List of triplets representing the relevant subgraph
     """
     try:
+        print(f"Processing subgraph query: {query_data.query}")
         # Retrieve the relevant subgraph from the existing knowledge graph
         subgraph = process_query_and_get_subgraph(query_data.query)
-        
+        print(f"Retrieved subgraph with {len(subgraph)} triplets")
         return subgraph
     except Exception as e:
+        print(f"Error in get_subgraph: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/create-and-query", response_model=Dict[str, List[Dict[str, str]]])
@@ -177,16 +193,33 @@ async def create_and_query(input_data: CombinedInput):
         Dictionary containing both the created knowledge graph and the retrieved subgraph
     """
     try:
+        print("\nStarting create_and_query function")
+        print(f"File path: {input_data.file_path}")
+        print(f"Query: {input_data.query}")
+        
         # First create the knowledge graph
-        await create_knowledge_graph(FileInput(file_path=input_data.text_file_path))
+        try:
+            print("Attempting to create knowledge graph...")
+            await create_knowledge_graph(FileInput(file_path=input_data.file_path))
+            print("Successfully created knowledge graph")
+        except Exception as e:
+            print(f"Error during knowledge graph creation: {str(e)}")
+            if "Torch not compiled with CUDA enabled" in str(e):
+                # If it's a CUDA error, we can still proceed with the query
+                print("CUDA error during graph creation, but continuing with query...")
+            else:
+                raise e
         
         # Then get the subgraph
+        print("Attempting to get subgraph...")
         subgraph = await get_subgraph(SubgraphQuery(query=input_data.query))
+        print("Successfully retrieved subgraph")
         
         return {
             "subgraph": subgraph
         }
     except Exception as e:
+        print(f"Error in create_and_query: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":

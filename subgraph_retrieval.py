@@ -6,6 +6,7 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
 import os
+import torch
 
 def process_query(query: str) -> Tuple[List[str], List[str]]:
     """
@@ -17,32 +18,63 @@ def process_query(query: str) -> Tuple[List[str], List[str]]:
     Returns:
         Tuple containing lists of nouns and verbs found in the query
     """
+    print("\nStarting process_query")
     # Load English language model with minimal components
+    print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "lemmatizer", "ner", "textcat"])
     
-    # Add FastCoref to the pipeline
-    nlp.add_pipe(
-        "fastcoref", 
-        config={
-            'model_architecture': 'LingMessCoref',
-            'model_path': 'biu-nlp/lingmess-coref',
-            'device': 'cuda:0'
-        }
-    )
-    
-    # Process the query with coreference resolution
-    doc = nlp(query, component_cfg={"fastcoref": {'resolve_text': True}})
+    # Try with CUDA first
+    try:
+        print("Checking CUDA availability...")
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            device = 'cuda:0'
+            print("CUDA is available, using GPU")
+        else:
+            device = 'cpu'
+            print("CUDA is not available, using CPU")
+            
+        # Add FastCoref to the pipeline
+        print("Adding FastCoref to pipeline...")
+        nlp.add_pipe(
+            "fastcoref", 
+            config={
+                'model_architecture': 'LingMessCoref',
+                'model_path': 'biu-nlp/lingmess-coref',
+                'device': device
+            }
+        )
+        
+        # Process the query with coreference resolution
+        print("Processing query with coreference resolution...")
+        doc = nlp(query, component_cfg={"fastcoref": {'resolve_text': True}})
+        print("Successfully processed query with coreference resolution")
+        
+    except Exception as e:
+        print(f"Error during CUDA processing: {str(e)}")
+        # If any error occurs (including CUDA errors), retry with CPU
+        print("Retrying with CPU...")
+        
+        # Update FastCoref config to use CPU
+        nlp.get_pipe("fastcoref").config['device'] = 'cpu'
+        
+        # Process the query with coreference resolution using CPU
+        print("Processing query with CPU...")
+        doc = nlp(query, component_cfg={"fastcoref": {'resolve_text': True}})
+        print("Successfully processed query with CPU")
     
     # Get the resolved text
+    print("Getting resolved text...")
     resolved_text = doc._.resolved_text
     
     # Process the resolved text
+    print("Processing resolved text...")
     doc = nlp(resolved_text)
     
     # Extract nouns and verbs
     nouns = [token.text for token in doc if token.pos_ == "NOUN"]
     verbs = [token.text for token in doc if token.pos_ == "VERB"]
     
+    print(f"Found {len(nouns)} nouns and {len(verbs)} verbs")
     return nouns, verbs
 
 def lemmatize_relations(verbs: List[str]) -> Dict[str, List[str]]:
@@ -90,30 +122,44 @@ def get_subgraph_from_neo4j(nodes: List[str], relations: List[str], depth: int =
         password = os.getenv('NEO4J_PASSWORD')
         
         if not all([uri, user, password]):
+            print("Error: Missing Neo4j credentials in .env file")
+            print(f"URI: {'Present' if uri else 'Missing'}")
+            print(f"User: {'Present' if user else 'Missing'}")
+            print(f"Password: {'Present' if password else 'Missing'}")
             raise ValueError("Missing Neo4j credentials in .env file")
         
+        print(f"Attempting to connect to Neo4j at {uri}")
         # Create Neo4j driver
         driver = GraphDatabase.driver(uri, auth=(user, password))
+        
+        # Verify connection
+        try:
+            driver.verify_connectivity()
+            print("Successfully connected to Neo4j database")
+        except Exception as e:
+            print(f"Failed to verify Neo4j connectivity: {str(e)}")
+            raise
         
         subgraph_triplets = []
         
         with driver.session() as session:
             # Create Cypher query to get subgraph with original forms metadata
-            cypher_query = """
-            MATCH path = (start)-[r*1..$depth]-(connected)
-            WHERE start.name IN $nodes AND r.type IN $relations
+            cypher_query = f"""
+            MATCH path = (start)-[r*1..{depth}]->(connected)
+            WHERE start.name IN $nodes AND ALL(rel IN r WHERE rel.type IN $relations)
             UNWIND path AS p
             WITH nodes(p) AS nodes, relationships(p) AS rels
             UNWIND range(0, size(rels)-1) AS i
-            RETURN {
+            RETURN {{
                 first_node: nodes[i].name,
                 relation: rels[i].type,
                 second_node: nodes[i+1].name,
-                original_forms: rels[i].original_forms
-            } AS triplet
+                original_form: rels[i].original_form,
+                pos_tag: rels[i].pos_tag
+            }} AS triplet
             """
             
-            result = session.run(cypher_query, nodes=nodes, relations=relations, depth=depth)
+            result = session.run(cypher_query, nodes=nodes, relations=relations)
             subgraph_triplets = [record["triplet"] for record in result]
             
         driver.close()
@@ -146,10 +192,9 @@ def reinflect_relations(subgraph: List[Dict[str, str]], target_verbs: List[str])
             'second_node': triplet['second_node']
         }
         
-        # Get original forms from metadata and use the first original form
-        original_forms = triplet.get('original_forms', [])
-        if original_forms:
-            new_triplet['relation'] = original_forms[0]['original_form']
+        # Use the original_form property if available
+        if 'original_form' in triplet:
+            new_triplet['relation'] = triplet['original_form']
         else:
             new_triplet['relation'] = triplet['relation']
         

@@ -10,42 +10,67 @@ import os
 import torch
 
 def create_triplets_spacy_fastcoref(text):
+    print("\nStarting create_triplets_spacy_fastcoref")
     # Load English language model with minimal components
+    print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "lemmatizer", "ner", "textcat"])
     
     # Add sentencizer to the pipeline
+    print("Adding sentencizer to pipeline...")
     nlp.add_pipe("sentencizer")
     
-    # Detect if CUDA is available
-    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-    
-    # Add FastCoref to the pipeline with LingMessCoref model
-    nlp.add_pipe(
-        "fastcoref", 
-        config={
-            'model_architecture': 'LingMessCoref',
-            'model_path': 'biu-nlp/lingmess-coref',
-            'device': device
-        }
-    )
-    
-    doc = nlp(text)
-    
-    triplets = []
-
-    # Process the text with coreference resolution
-    doc = nlp(text, component_cfg={"fastcoref": {'resolve_text': True}})
+    # Try with CUDA first
+    try:
+        print("Checking CUDA availability...")
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            device = 'cuda:0'
+            print("CUDA is available, using GPU")
+        else:
+            device = 'cpu'
+            print("CUDA is not available, using CPU")
+            
+        # Add FastCoref to the pipeline with LingMessCoref model
+        print("Adding FastCoref to pipeline...")
+        nlp.add_pipe(
+            "fastcoref", 
+            config={
+                'model_architecture': 'LingMessCoref',
+                'model_path': 'biu-nlp/lingmess-coref',
+                'device': device
+            }
+        )
+        
+        # Process the text with coreference resolution
+        print("Processing text with coreference resolution...")
+        doc = nlp(text, component_cfg={"fastcoref": {'resolve_text': True}})
+        print("Successfully processed text with coreference resolution")
+        
+    except Exception as e:
+        print(f"Error during CUDA processing: {str(e)}")
+        # If any error occurs (including CUDA errors), retry with CPU
+        print("Retrying with CPU...")
+        
+        # Update FastCoref config to use CPU
+        nlp.get_pipe("fastcoref").config['device'] = 'cpu'
+        
+        # Process the text with coreference resolution using CPU
+        print("Processing text with CPU...")
+        doc = nlp(text, component_cfg={"fastcoref": {'resolve_text': True}})
+        print("Successfully processed text with CPU")
     
     # Get the resolved text
+    print("Getting resolved text...")
     resolved_text = doc._.resolved_text
     
     # Process the resolved text
+    print("Processing resolved text...")
     doc = nlp(resolved_text)
     
     triplets = []
     processed_nouns = set()  # To avoid duplicate triplets
     
     # Process each sentence
+    print("Processing sentences to create triplets...")
     for sent in doc.sents:
         # Get all nouns and verbs in the sentence
         nouns = [token for token in sent if token.pos_ == "NOUN"]
@@ -74,27 +99,20 @@ def create_triplets_spacy_fastcoref(text):
                     triplets.append(triplet)
                     processed_nouns.add(triplet_key)
     
+    print(f"Created {len(triplets)} triplets")
     return triplets
 
 def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Dict[str, List[Tuple[str, str]]]]:
-    """
-    Process triplets to lemmatize relations while tracking original forms and POS tags.
-    
-    Args:
-        triplets: List of dictionaries containing 'first_node', 'relation', and 'second_node'
-    
-    Returns:
-        Tuple containing:
-        - List of processed triplets with lemmatized relations
-        - Dictionary mapping lemmatized forms to lists of (original_form, pos_tag) tuples
-    """
+    print("\nStarting process_triplets_with_lemmatization")
     # Load English language model with lemmatizer
+    print("Loading spaCy model with lemmatizer...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "ner", "textcat"])
     
     # Initialize tracking dictionary
     relation_tracking = defaultdict(list)
     
     # Process each triplet
+    print("Processing triplets with lemmatization...")
     processed_triplets = []
     for triplet in triplets:
         # Create a new triplet with the same nodes
@@ -119,18 +137,14 @@ def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple
         
         processed_triplets.append(processed_triplet)
     
+    print(f"Processed {len(processed_triplets)} triplets")
     return processed_triplets, dict(relation_tracking)
 
 def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
-    """
-    Upload the knowledge graph triplets to Neo4j using credentials from .env file.
-    
-    Args:
-        triplets: List of dictionaries containing 'first_node', 'relation', and 'second_node'
-        relation_tracking: Dictionary mapping lemmatized forms to lists of (original_form, pos_tag) tuples
-    """
+    print("\nStarting upload_to_neo4j")
     try:
         # Load environment variables
+        print("Loading environment variables...")
         load_dotenv()
         
         # Get Neo4j credentials from environment variables
@@ -142,9 +156,11 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
             raise ValueError("Missing Neo4j credentials in .env file. Please ensure NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD are set.")
         
         # Create Neo4j driver
+        print("Creating Neo4j driver...")
         driver = GraphDatabase.driver(uri, auth=(user, password))
         
         with driver.session() as session:
+            print("Starting to upload triplets to Neo4j...")
             # Create nodes and relationships
             for triplet in triplets:
                 # Convert entity names to valid label names
@@ -200,6 +216,7 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
                           pos_tag=pos_tag)
             
             # Set display settings for all nodes
+            print("Setting display settings for nodes...")
             session.run("""
             MATCH (n)
             SET n.displayName = n.name
