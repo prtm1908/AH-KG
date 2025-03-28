@@ -75,6 +75,7 @@ def process_query(query: str) -> Tuple[List[str], List[str]]:
     verbs = [token.text for token in doc if token.pos_ == "VERB"]
     
     print(f"Found {len(nouns)} nouns and {len(verbs)} verbs")
+    print(f"Nouns: {nouns}")
     return nouns, verbs
 
 def lemmatize_relations(verbs: List[str]) -> Dict[str, List[str]]:
@@ -144,23 +145,87 @@ def get_subgraph_from_neo4j(nodes: List[str], relations: List[str], depth: int =
         
         with driver.session() as session:
             # Create Cypher query to get subgraph with original forms metadata
-            cypher_query = f"""
-            MATCH path = (start)-[r*1..{depth}]->(connected)
-            WHERE start.name IN $nodes AND ALL(rel IN r WHERE rel.type IN $relations)
-            UNWIND path AS p
-            WITH nodes(p) AS nodes, relationships(p) AS rels
-            UNWIND range(0, size(rels)-1) AS i
-            RETURN {{
-                first_node: nodes[i].name,
-                relation: rels[i].type,
-                second_node: nodes[i+1].name,
-                original_form: rels[i].original_form,
-                pos_tag: rels[i].pos_tag
-            }} AS triplet
-            """
-            
-            result = session.run(cypher_query, nodes=nodes, relations=relations)
-            subgraph_triplets = [record["triplet"] for record in result]
+            if relations:  # If we have verbs/relations to match
+                # First find all nodes connected by our verbs
+                verb_nodes_query = f"""
+                MATCH path = (start)-[r*1..{depth}]->(connected)
+                WHERE ALL(rel IN r WHERE rel.type IN $relations)
+                RETURN DISTINCT start.name as node_name
+                UNION
+                MATCH path = (start)-[r*1..{depth}]->(connected)
+                WHERE ALL(rel IN r WHERE rel.type IN $relations)
+                RETURN DISTINCT connected.name as node_name
+                """
+                
+                # Get all nodes connected by our verbs
+                verb_nodes_result = session.run(verb_nodes_query, relations=relations)
+                verb_connected_nodes = [record["node_name"] for record in verb_nodes_result]
+                print(f"Found {len(verb_connected_nodes)} nodes connected by verbs: {verb_connected_nodes}")
+                
+                # Get all triplets containing our verbs
+                verb_triplets_query = f"""
+                MATCH path = (start)-[r*1..{depth}]->(connected)
+                WHERE ALL(rel IN r WHERE rel.type IN $relations)
+                UNWIND path AS p
+                WITH nodes(p) AS nodes, relationships(p) AS rels
+                UNWIND range(0, size(rels)-1) AS i
+                RETURN {{
+                    first_node: nodes[i].name,
+                    relation: rels[i].type,
+                    second_node: nodes[i+1].name,
+                    original_form: rels[i].original_form,
+                    pos_tag: rels[i].pos_tag
+                }} AS triplet
+                """
+                
+                verb_results = session.run(verb_triplets_query, relations=relations)
+                verb_triplets = [record["triplet"] for record in verb_results]
+                print(f"Found {len(verb_triplets)} triplets with verbs")
+                
+                # If we also have nouns, find triplets containing those nouns
+                if nodes:
+                    # Find paths containing our nouns
+                    noun_query = f"""
+                    MATCH path = (start)-[r*1..{depth}]->(connected)
+                    WHERE (start.name IN $nodes OR connected.name IN $nodes)
+                    UNWIND path AS p
+                    WITH nodes(p) AS nodes, relationships(p) AS rels
+                    UNWIND range(0, size(rels)-1) AS i
+                    RETURN {{
+                        first_node: nodes[i].name,
+                        relation: rels[i].type,
+                        second_node: nodes[i+1].name,
+                        original_form: rels[i].original_form,
+                        pos_tag: rels[i].pos_tag
+                    }} AS triplet
+                    """
+                    
+                    noun_results = session.run(noun_query, nodes=nodes)
+                    noun_triplets = [record["triplet"] for record in noun_results]
+                    print(f"Found {len(noun_triplets)} triplets with nouns")
+                    
+                    # Combine results and remove duplicates
+                    all_triplets = {str(triplet) for triplet in verb_triplets + noun_triplets}
+                    subgraph_triplets = [eval(triplet) for triplet in all_triplets]
+                else:
+                    subgraph_triplets = verb_triplets
+            else:  # If no verbs found, get all relationships containing our nodes
+                cypher_query = f"""
+                MATCH path = (start)-[r*1..{depth}]->(connected)
+                WHERE (start.name IN $nodes OR connected.name IN $nodes)
+                UNWIND path AS p
+                WITH nodes(p) AS nodes, relationships(p) AS rels
+                UNWIND range(0, size(rels)-1) AS i
+                RETURN {{
+                    first_node: nodes[i].name,
+                    relation: rels[i].type,
+                    second_node: nodes[i+1].name,
+                    original_form: rels[i].original_form,
+                    pos_tag: rels[i].pos_tag
+                }} AS triplet
+                """
+                result = session.run(cypher_query, nodes=nodes)
+                subgraph_triplets = [record["triplet"] for record in result]
             
         driver.close()
         return subgraph_triplets
@@ -215,6 +280,10 @@ def process_query_and_get_subgraph(query: str) -> List[Dict[str, str]]:
     # 1. Process query to identify nouns and verbs (including coreference resolution)
     nouns, verbs = process_query(query)
     
+    print(f"\nQuery analysis:")
+    print(f"Found nouns: {nouns}")
+    print(f"Found verbs: {verbs}")
+    
     # 2. Lemmatize relations
     relation_tracking = lemmatize_relations(verbs)
     
@@ -223,8 +292,21 @@ def process_query_and_get_subgraph(query: str) -> List[Dict[str, str]]:
     for lemmatized, originals in relation_tracking.items():
         all_relations.extend([lemmatized] + originals)
     
+    print(f"All relations to search for: {all_relations}")
+    
     # 4. Get subgraph from Neo4j
+    if not nouns and all_relations:
+        print("No nouns found but verbs found - will search for all nodes connected by these verbs")
+    elif nouns and not all_relations:
+        print("Nouns found but no verbs - will search for all relationships containing these nouns")
+    elif nouns and all_relations:
+        print("Both nouns and verbs found - will search for specific relationships between these nouns")
+    else:
+        print("No nouns or verbs found - will return empty result")
+        return []
+    
     subgraph = get_subgraph_from_neo4j(nouns, all_relations)
+    print(f"Found {len(subgraph)} triplets in subgraph")
     
     # 5. Re-inflect relations to match original verbs from query
     reinflected_subgraph = reinflect_relations(subgraph, verbs)
