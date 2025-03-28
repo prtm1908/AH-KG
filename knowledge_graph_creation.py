@@ -12,13 +12,16 @@ def create_triplets_spacy_fastcoref(text):
     # Load English language model with minimal components
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "lemmatizer", "ner", "textcat"])
     
+    # Add sentencizer to the pipeline
+    nlp.add_pipe("sentencizer")
+    
     # Add FastCoref to the pipeline with LingMessCoref model
     nlp.add_pipe(
         "fastcoref", 
         config={
             'model_architecture': 'LingMessCoref',
             'model_path': 'biu-nlp/lingmess-coref',
-            'device': 'cuda:0'
+            'device': 'cpu'
         }
     )
     
@@ -50,6 +53,10 @@ def create_triplets_spacy_fastcoref(text):
             for i in range(len(nouns) - 1):
                 # Use the first verb for the first triplet, or subsequent verbs for later triplets
                 verb = verbs[min(i, len(verbs) - 1)]
+                
+                # Skip if first_node and second_node are the same
+                if nouns[i].text == nouns[i + 1].text:
+                    continue
                 
                 # Create a unique key for this triplet to avoid duplicates
                 triplet_key = f"{nouns[i].text}_{verb.text}_{nouns[i + 1].text}"
@@ -136,31 +143,57 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
         with driver.session() as session:
             # Create nodes and relationships
             for triplet in triplets:
+                # Convert entity names to valid label names
+                subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
+                object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
+                
+                # Ensure labels start with a letter
+                if not subject_label[0].isalpha():
+                    subject_label = 'E_' + subject_label
+                if not object_label[0].isalpha():
+                    object_label = 'E_' + object_label
+                
+                # Remove consecutive underscores and trailing underscores
+                subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
+                object_label = re.sub(r'_+', '_', object_label).rstrip('_')
+                
+                # Convert relation to valid Neo4j identifier
+                rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
+                if not rel_type[0].isalpha():
+                    rel_type = 'REL_' + rel_type
+                rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
+                
                 # Get the original forms and POS tags for this relation
                 lemmatized_relation = triplet['relation']
                 original_forms = relation_tracking.get(lemmatized_relation, [])
                 
-                # Create a list of dictionaries containing original forms and their POS tags
-                relation_metadata = [
-                    {'original_form': orig_form, 'pos_tag': pos_tag}
-                    for orig_form, pos_tag in original_forms
-                ]
+                # Store the first original form and POS tag as simple strings
+                original_form = original_forms[0][0] if original_forms else triplet['relation']
+                pos_tag = original_forms[0][1] if original_forms else 'VERB'
                 
-                cypher_query = """
-                MERGE (s {name: $subject})
-                MERGE (o {name: $object})
-                CREATE (s)-[r]->(o)
+                # Create nodes with labels
+                cypher_query = f"""
+                MERGE (s:{subject_label} {{name: $subject}})
+                SET s.text = $subject
+                SET s.caption = $subject
+                MERGE (o:{object_label} {{name: $object}})
+                SET o.text = $object
+                SET o.caption = $object
+                CREATE (s)-[r:{rel_type}]->(o)
                 SET r.type = $relation
                 SET r.name = $relation
                 SET r.caption = $relation
-                SET r.original_forms = $relation_metadata
+                SET r.original_form = $original_form
+                SET r.pos_tag = $pos_tag
+                SET r.strength = 1.0
                 """
                 
                 session.run(cypher_query,
                           subject=triplet['first_node'],
                           object=triplet['second_node'],
                           relation=triplet['relation'],
-                          relation_metadata=relation_metadata)
+                          original_form=original_form,
+                          pos_tag=pos_tag)
             
             # Set display settings for all nodes
             session.run("""
@@ -174,8 +207,10 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
         
     except ServiceUnavailable:
         print("Could not connect to Neo4j database. Please check your connection details.")
+        raise  # Re-raise the exception to be handled by the API endpoint
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+        raise  # Re-raise the exception to be handled by the API endpoint
 
 # Example usage
 if __name__ == "__main__":
