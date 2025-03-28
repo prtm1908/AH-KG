@@ -7,6 +7,7 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
 import os
+import torch
 
 def create_triplets_spacy_fastcoref(text):
     # Load English language model with minimal components
@@ -15,13 +16,16 @@ def create_triplets_spacy_fastcoref(text):
     # Add sentencizer to the pipeline
     nlp.add_pipe("sentencizer")
     
+    # Detect if CUDA is available
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+    
     # Add FastCoref to the pipeline with LingMessCoref model
     nlp.add_pipe(
         "fastcoref", 
         config={
             'model_architecture': 'LingMessCoref',
             'model_path': 'biu-nlp/lingmess-coref',
-            'device': 'cpu'
+            'device': device
         }
     )
     

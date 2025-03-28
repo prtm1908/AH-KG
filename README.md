@@ -9,14 +9,19 @@ A FastAPI-based service that creates knowledge graphs from text and allows query
 pip install -r requirements.txt
 ```
 
-2. Set up environment variables in a `.env` file:
+2. Download the required spaCy model:
+```bash
+python -m spacy download en_core_web_sm
+```
+
+3. Set up environment variables in a `.env` file:
 ```
 NEO4J_URI=your_neo4j_uri
 NEO4J_USER=your_neo4j_username
 NEO4J_PASSWORD=your_neo4j_password
 ```
 
-3. Start the FastAPI server:
+4. Start the FastAPI server:
 ```bash
 python app.py
 ```
