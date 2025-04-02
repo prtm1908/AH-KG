@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_neo4j
+from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_neo4j, replace_pronouns_with_previous_nodes
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -145,6 +145,11 @@ async def create_knowledge_graph(input_data: FileInput):
             print("Processing triplets with lemmatization...")
             processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
             print(f"Processed {len(processed_triplets)} triplets")
+            
+            # Replace pronouns with previous nodes
+            print("Replacing pronouns with previous nodes...")
+            processed_triplets = replace_pronouns_with_previous_nodes(processed_triplets)
+            print(f"Processed {len(processed_triplets)} triplets after pronoun replacement")
             
             # Upload to Neo4j
             print("Uploading to Neo4j...")

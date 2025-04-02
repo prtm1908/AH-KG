@@ -140,6 +140,72 @@ def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple
     print(f"Processed {len(processed_triplets)} triplets")
     return processed_triplets, dict(relation_tracking)
 
+def replace_pronouns_with_previous_nodes(triplets: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    print("\nStarting replace_pronouns_with_previous_nodes")
+    # List of pronouns to check (case-insensitive)
+    pronouns = {
+        # First-person singular
+        "i", "me", "my", "mine", "myself",
+
+        # First-person plural
+        "we", "us", "our", "ours", "ourselves", "ourself",
+
+        # Second-person (singular & plural)
+        "you", "your", "yours", "yourself", "yourselves",
+
+        # Third-person singular
+        "he", "she", "it", "they",  
+        "him", "her", "them",  
+        "his", "hers", "its", "their", "theirs",
+        "himself", "herself", "itself", "themselves", "themself",
+
+        # Gender-neutral & nonbinary pronouns
+        "ze", "hir", "hirs", "hirself",
+        "xe", "xem", "xyr", "xyrs", "xemself",
+        "ey", "em", "eir", "eirs", "eirself",
+        "ve", "ver", "vis", "vers", "verself",
+        "ne", "nem", "nir", "nirs", "nirself",
+        "tey", "ter", "tem", "ters", "terself",
+        "hu", "hum", "hus", "huself",
+        "per", "pers", "perself",
+
+        # Archaic & rare pronouns
+        "thon", "thons", "oneself"
+    }
+    
+    processed_triplets = []
+    replaced_count = 0  # Track number of triplets with pronouns replaced
+    
+    for i, triplet in enumerate(triplets):
+        processed_triplet = triplet.copy()
+        
+        # Check if both nodes are pronouns
+        first_is_pronoun = triplet['first_node'].lower() in pronouns
+        second_is_pronoun = triplet['second_node'].lower() in pronouns
+        
+        if i > 0:
+            if first_is_pronoun and second_is_pronoun:
+                # If both are pronouns, use first node for first pronoun and second node for second pronoun
+                processed_triplet['first_node'] = processed_triplets[i-1]['first_node']
+                processed_triplet['second_node'] = processed_triplets[i-1]['second_node']
+                print(f"Replaced both pronouns '{triplet['first_node']}' and '{triplet['second_node']}' with '{processed_triplet['first_node']}' and '{processed_triplet['second_node']}'")
+                replaced_count += 1
+            else:
+                # Handle single pronoun cases
+                if first_is_pronoun:
+                    processed_triplet['first_node'] = processed_triplets[i-1]['second_node']
+                    print(f"Replaced pronoun '{triplet['first_node']}' with '{processed_triplet['first_node']}' in first node")
+                    replaced_count += 1
+                if second_is_pronoun:
+                    processed_triplet['second_node'] = processed_triplets[i-1]['second_node']
+                    print(f"Replaced pronoun '{triplet['second_node']}' with '{processed_triplet['second_node']}' in second node")
+                    replaced_count += 1
+        
+        processed_triplets.append(processed_triplet)
+    
+    print(f"Replaced pronouns in {replaced_count} triplets")
+    return processed_triplets
+
 def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     print("\nStarting upload_to_neo4j")
     try:
