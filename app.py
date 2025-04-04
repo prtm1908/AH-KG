@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_neo4j, replace_pronouns_with_previous_nodes
+from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, replace_pronouns_with_previous_nodes
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -58,6 +58,84 @@ def clear_neo4j_database():
         print(f"An error occurred while clearing the database: {str(e)}")
         raise
 
+def clear_nebula_database():
+    """
+    Clear all vertices and edges from the Nebula Graph database.
+    """
+    try:
+        # Load environment variables
+        load_dotenv()
+        
+        # Get Nebula Graph credentials from environment variables
+        host = os.getenv('NEBULA_HOST')
+        port = int(os.getenv('NEBULA_PORT', '9669'))
+        user = os.getenv('NEBULA_USER')
+        password = os.getenv('NEBULA_PASSWORD')
+        space = os.getenv('NEBULA_SPACE')
+        
+        if not all([host, user, password, space]):
+            raise ValueError("Missing Nebula Graph credentials in .env file")
+        
+        # Import Nebula Graph modules
+        from nebula3.gclient.net import ConnectionPool
+        from nebula3.Config import Config
+        
+        # Create Nebula Graph connection pool
+        config = Config()
+        connection_pool = ConnectionPool()
+        
+        # Initialize the connection pool
+        assert connection_pool.init([(host, port)], config)
+        
+        # Get a session from the pool
+        session = connection_pool.get_session(user, password)
+        
+        # Use the specified space
+        resp = session.execute(f"USE {space}")
+        if not resp.is_succeeded():
+            print(f"Space {space} doesn't exist. No need to clear.")
+            session.release()
+            connection_pool.close()
+            return
+        
+        # Clear all vertices and edges
+        resp = session.execute("MATCH (v) DETACH DELETE v")
+        if not resp.is_succeeded():
+            print(f"Warning: Failed to clear Nebula Graph database: {resp.error_msg()}")
+        
+        # Release the session back to the pool
+        session.release()
+        
+        # Close the connection pool
+        connection_pool.close()
+        
+        print("Successfully cleared Nebula Graph database")
+        
+    except Exception as e:
+        print(f"An error occurred while clearing the Nebula Graph database: {str(e)}")
+        raise
+
+def clear_graph_database():
+    """
+    Clear all nodes and relationships from the specified graph database(s).
+    """
+    # Load environment variables
+    load_dotenv()
+    
+    # Get the database type from environment variables
+    db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    
+    # Clear the specified database(s)
+    if db_type == 'neo4j':
+        clear_neo4j_database()
+    elif db_type == 'nebula':
+        clear_nebula_database()
+    elif db_type == 'both':
+        clear_neo4j_database()
+        clear_nebula_database()
+    else:
+        raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
+
 def read_text_file(file_path: str) -> str:
     """
     Read text from a file.
@@ -109,7 +187,7 @@ def process_text_in_batches(text: str, batch_size: int = 1000) -> List[str]:
 @app.post("/create-knowledge-graph", response_model=Dict[str, str])
 async def create_knowledge_graph(input_data: FileInput):
     """
-    Create a knowledge graph from input text file and store it in Neo4j.
+    Create a knowledge graph from input text file and store it in the specified graph database(s).
     Processes text in batches of 1000 sentences.
     
     Args:
@@ -121,8 +199,8 @@ async def create_knowledge_graph(input_data: FileInput):
     try:
         print("Starting create_knowledge_graph function")
         # Clear the existing database first
-        print("Clearing Neo4j database...")
-        clear_neo4j_database()
+        print("Clearing graph database...")
+        clear_graph_database()
         
         # Read text from file
         print(f"Reading text from file: {input_data.file_path}")
@@ -151,15 +229,15 @@ async def create_knowledge_graph(input_data: FileInput):
             processed_triplets = replace_pronouns_with_previous_nodes(processed_triplets)
             print(f"Processed {len(processed_triplets)} triplets after pronoun replacement")
             
-            # Upload to Neo4j
-            print("Uploading to Neo4j...")
-            upload_to_neo4j(processed_triplets, relation_tracking)
-            print("Successfully uploaded to Neo4j")
+            # Upload to the specified graph database(s)
+            print("Uploading to graph database...")
+            upload_to_database(processed_triplets, relation_tracking)
+            print("Successfully uploaded to graph database")
         
         print("Successfully completed all batches")
         return {
             "status": "success",
-            "message": f"Successfully processed {len(batches)} batches of text and uploaded to Neo4j"
+            "message": f"Successfully processed {len(batches)} batches of text and uploaded to graph database"
         }
     except Exception as e:
         print(f"Error in create_knowledge_graph: {str(e)}")

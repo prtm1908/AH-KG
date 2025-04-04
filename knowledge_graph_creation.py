@@ -8,6 +8,8 @@ from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
 import os
 import torch
+from nebula3.gclient.net import ConnectionPool
+from nebula3.Config import Config
 
 def create_triplets_spacy_fastcoref(text):
     print("\nStarting create_triplets_spacy_fastcoref")
@@ -299,6 +301,140 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
         print(f"An error occurred: {str(e)}")
         raise  # Re-raise the exception to be handled by the API endpoint
 
+def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
+    print("\nStarting upload_to_nebula")
+    try:
+        # Load environment variables
+        print("Loading environment variables...")
+        load_dotenv()
+        
+        # Get Nebula Graph credentials from environment variables
+        host = os.getenv('NEBULA_HOST')
+        port = int(os.getenv('NEBULA_PORT', '9669'))
+        user = os.getenv('NEBULA_USER')
+        password = os.getenv('NEBULA_PASSWORD')
+        space = os.getenv('NEBULA_SPACE')
+        
+        if not all([host, user, password, space]):
+            raise ValueError("Missing Nebula Graph credentials in .env file. Please ensure NEBULA_HOST, NEBULA_USER, NEBULA_PASSWORD, and NEBULA_SPACE are set.")
+        
+        # Create Nebula Graph connection pool
+        print("Creating Nebula Graph connection pool...")
+        config = Config()
+        connection_pool = ConnectionPool()
+        
+        # Initialize the connection pool
+        assert connection_pool.init([(host, port)], config)
+        
+        # Get a session from the pool
+        session = connection_pool.get_session(user, password)
+        
+        # Use the specified space
+        resp = session.execute(f"USE {space}")
+        if not resp.is_succeeded():
+            raise ValueError(f"Space {space} doesn't exist or cannot be accessed: {resp.error_msg()}")
+        
+        print("Starting to upload triplets to Nebula Graph...")
+        # Create nodes and relationships
+        for triplet in triplets:
+            # Convert entity names to valid label names
+            subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
+            object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
+            
+            # Ensure labels start with a letter
+            if not subject_label[0].isalpha():
+                subject_label = 'E_' + subject_label
+            if not object_label[0].isalpha():
+                object_label = 'E_' + object_label
+            
+            # Remove consecutive underscores and trailing underscores
+            subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
+            object_label = re.sub(r'_+', '_', object_label).rstrip('_')
+            
+            # Convert relation to valid Nebula Graph identifier
+            rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
+            if not rel_type[0].isalpha():
+                rel_type = 'REL_' + rel_type
+            rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
+            
+            # Get the original forms and POS tags for this relation
+            lemmatized_relation = triplet['relation']
+            original_forms = relation_tracking.get(lemmatized_relation, [])
+            
+            # Store the first original form and POS tag as simple strings
+            original_form = original_forms[0][0] if original_forms else triplet['relation']
+            pos_tag = original_forms[0][1] if original_forms else 'VERB'
+            
+            # Create nodes with properties
+            subject_query = f"""
+            INSERT VERTEX IF NOT EXISTS {subject_label}(name, text, caption, displayName, title) 
+            VALUES "{triplet['first_node']}":("{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}")
+            """
+            
+            object_query = f"""
+            INSERT VERTEX IF NOT EXISTS {object_label}(name, text, caption, displayName, title) 
+            VALUES "{triplet['second_node']}":("{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}")
+            """
+            
+            # Create edge with properties
+            edge_query = f"""
+            INSERT EDGE IF NOT EXISTS {rel_type}(type, name, caption, original_form, pos_tag, strength) 
+            FROM "{triplet['first_node']}" TO "{triplet['second_node']}" 
+            VALUES ("{triplet['relation']}", "{triplet['relation']}", "{triplet['relation']}", "{original_form}", "{pos_tag}", 1.0)
+            """
+            
+            # Execute queries
+            resp = session.execute(subject_query)
+            if not resp.is_succeeded():
+                print(f"Error creating subject node: {resp.error_msg()}")
+            
+            resp = session.execute(object_query)
+            if not resp.is_succeeded():
+                print(f"Error creating object node: {resp.error_msg()}")
+            
+            resp = session.execute(edge_query)
+            if not resp.is_succeeded():
+                print(f"Error creating edge: {resp.error_msg()}")
+        
+        # Release the session back to the pool
+        session.release()
+        
+        # Close the connection pool
+        connection_pool.close()
+        
+        print("Successfully uploaded knowledge graph to Nebula Graph")
+        
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        raise  # Re-raise the exception to be handled by the API endpoint
+
+def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
+    """
+    Upload triplets to the database(s) specified in the DB_TYPE environment variable.
+    
+    Args:
+        triplets: List of triplets to upload
+        relation_tracking: Dictionary mapping lemmatized relations to lists of (original_form, pos_tag) tuples
+    """
+    print("\nStarting upload_to_database")
+    
+    # Load environment variables
+    load_dotenv()
+    
+    # Get the database type from environment variables
+    db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    
+    # Upload to the specified database(s)
+    if db_type == 'neo4j':
+        upload_to_neo4j(triplets, relation_tracking)
+    elif db_type == 'nebula':
+        upload_to_nebula(triplets, relation_tracking)
+    elif db_type == 'both':
+        upload_to_neo4j(triplets, relation_tracking)
+        upload_to_nebula(triplets, relation_tracking)
+    else:
+        raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
+
 # Example usage
 if __name__ == "__main__":
     sample_text = "John loves playing football. He also enjoys basketball. Mary reads books in the library. She often studies there."
@@ -310,5 +446,5 @@ if __name__ == "__main__":
     processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
     print("\nProcessed triplets:", processed_triplets)
     
-    # Upload to Neo4j with relation tracking metadata
-    upload_to_neo4j(processed_triplets, relation_tracking) 
+    # Upload to the specified database(s)
+    upload_to_database(processed_triplets, relation_tracking) 

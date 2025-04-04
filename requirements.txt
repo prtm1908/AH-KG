@@ -4,3 +4,4 @@ neo4j
 python-dotenv
 fastapi
 uvicorn
+nebula3-python

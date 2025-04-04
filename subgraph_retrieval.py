@@ -7,6 +7,8 @@ from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
 import os
 import torch
+from nebula3.gclient.net import ConnectionPool
+from nebula3.Config import Config
 
 def process_query(query: str) -> Tuple[List[str], List[str]]:
     """
@@ -294,7 +296,7 @@ def process_query_and_get_subgraph(query: str) -> List[Dict[str, str]]:
     
     print(f"All relations to search for: {all_relations}")
     
-    # 4. Get subgraph from Neo4j
+    # 4. Get subgraph from the specified database(s)
     if not nouns and all_relations:
         print("No nouns found but verbs found - will search for all nodes connected by these verbs")
     elif nouns and not all_relations:
@@ -305,13 +307,236 @@ def process_query_and_get_subgraph(query: str) -> List[Dict[str, str]]:
         print("No nouns or verbs found - will return empty result")
         return []
     
-    subgraph = get_subgraph_from_neo4j(nouns, all_relations)
+    subgraph = get_subgraph_from_database(nouns, all_relations)
     print(f"Found {len(subgraph)} triplets in subgraph")
     
     # 5. Re-inflect relations to match original verbs from query
     reinflected_subgraph = reinflect_relations(subgraph, verbs)
     
     return reinflected_subgraph
+
+def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int = 2) -> List[Dict[str, str]]:
+    """
+    Extract a subgraph from Nebula Graph based on given nodes and relations.
+    
+    Args:
+        nodes: List of nodes to start from
+        relations: List of relations to consider
+        depth: Depth of traversal (default: 2)
+        
+    Returns:
+        List of triplets representing the subgraph, including original forms metadata
+    """
+    try:
+        # Load environment variables
+        load_dotenv()
+        
+        # Get Nebula Graph credentials
+        host = os.getenv('NEBULA_HOST')
+        port = int(os.getenv('NEBULA_PORT', '9669'))
+        user = os.getenv('NEBULA_USER')
+        password = os.getenv('NEBULA_PASSWORD')
+        space = os.getenv('NEBULA_SPACE')
+        
+        if not all([host, user, password, space]):
+            print("Error: Missing Nebula Graph credentials in .env file")
+            print(f"Host: {'Present' if host else 'Missing'}")
+            print(f"User: {'Present' if user else 'Missing'}")
+            print(f"Password: {'Present' if password else 'Missing'}")
+            print(f"Space: {'Present' if space else 'Missing'}")
+            raise ValueError("Missing Nebula Graph credentials in .env file")
+        
+        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+        
+        # Create Nebula Graph connection pool
+        config = Config()
+        connection_pool = ConnectionPool()
+        
+        # Initialize the connection pool
+        assert connection_pool.init([(host, port)], config)
+        
+        # Get a session from the pool
+        session = connection_pool.get_session(user, password)
+        
+        # Use the specified space
+        resp = session.execute(f"USE {space}")
+        if not resp.is_succeeded():
+            print(f"Space {space} doesn't exist or cannot be accessed: {resp.error_msg()}")
+            session.release()
+            connection_pool.close()
+            return []
+        
+        subgraph_triplets = []
+        
+        # Create nGQL query to get subgraph with original forms metadata
+        if relations:  # If we have verbs/relations to match
+            # First find all nodes connected by our verbs
+            relations_str = ", ".join([f"'{rel}'" for rel in relations])
+            verb_nodes_query = f"""
+            MATCH p=(v:entity)-[e:relation*1..{depth}]->(v2:entity)
+            WHERE ALL(rel IN e WHERE rel.type IN [{relations_str}])
+            RETURN DISTINCT v.name as node_name
+            UNION
+            MATCH p=(v:entity)-[e:relation*1..{depth}]->(v2:entity)
+            WHERE ALL(rel IN e WHERE rel.type IN [{relations_str}])
+            RETURN DISTINCT v2.name as node_name
+            """
+            
+            # Get all nodes connected by our verbs
+            resp = session.execute(verb_nodes_query)
+            if not resp.is_succeeded():
+                print(f"Error executing verb nodes query: {resp.error_msg()}")
+                session.release()
+                connection_pool.close()
+                return []
+            
+            verb_connected_nodes = []
+            for row in resp.rows():
+                verb_connected_nodes.append(row[0])
+            
+            print(f"Found {len(verb_connected_nodes)} nodes connected by verbs: {verb_connected_nodes}")
+            
+            # Get all triplets containing our verbs
+            verb_triplets_query = f"""
+            MATCH p=(v:entity)-[e:relation*1..{depth}]->(v2:entity)
+            WHERE ALL(rel IN e WHERE rel.type IN [{relations_str}])
+            UNWIND p AS path
+            WITH nodes(path) AS nodes, relationships(path) AS rels
+            UNWIND range(0, size(rels)-1) AS i
+            RETURN {{
+                first_node: nodes[i].name,
+                relation: rels[i].type,
+                second_node: nodes[i+1].name,
+                original_form: rels[i].original_form,
+                pos_tag: rels[i].pos_tag
+            }} AS triplet
+            """
+            
+            resp = session.execute(verb_triplets_query)
+            if not resp.is_succeeded():
+                print(f"Error executing verb triplets query: {resp.error_msg()}")
+                session.release()
+                connection_pool.close()
+                return []
+            
+            verb_triplets = []
+            for row in resp.rows():
+                verb_triplets.append(eval(row[0]))
+            
+            print(f"Found {len(verb_triplets)} triplets with verbs")
+            
+            # If we also have nouns, find triplets containing those nouns
+            if nodes:
+                # Find paths containing our nouns
+                nodes_str = ", ".join([f"'{node}'" for node in nodes])
+                noun_query = f"""
+                MATCH p=(v:entity)-[e:relation*1..{depth}]->(v2:entity)
+                WHERE v.name IN [{nodes_str}] OR v2.name IN [{nodes_str}]
+                UNWIND p AS path
+                WITH nodes(path) AS nodes, relationships(path) AS rels
+                UNWIND range(0, size(rels)-1) AS i
+                RETURN {{
+                    first_node: nodes[i].name,
+                    relation: rels[i].type,
+                    second_node: nodes[i+1].name,
+                    original_form: rels[i].original_form,
+                    pos_tag: rels[i].pos_tag
+                }} AS triplet
+                """
+                
+                resp = session.execute(noun_query)
+                if not resp.is_succeeded():
+                    print(f"Error executing noun query: {resp.error_msg()}")
+                    session.release()
+                    connection_pool.close()
+                    return []
+                
+                noun_triplets = []
+                for row in resp.rows():
+                    noun_triplets.append(eval(row[0]))
+                
+                print(f"Found {len(noun_triplets)} triplets with nouns")
+                
+                # Combine results and remove duplicates
+                all_triplets = {str(triplet) for triplet in verb_triplets + noun_triplets}
+                subgraph_triplets = [eval(triplet) for triplet in all_triplets]
+            else:
+                subgraph_triplets = verb_triplets
+        else:  # If no verbs found, get all relationships containing our nodes
+            nodes_str = ", ".join([f"'{node}'" for node in nodes])
+            nGQL_query = f"""
+            MATCH p=(v:entity)-[e:relation*1..{depth}]->(v2:entity)
+            WHERE v.name IN [{nodes_str}] OR v2.name IN [{nodes_str}]
+            UNWIND p AS path
+            WITH nodes(path) AS nodes, relationships(path) AS rels
+            UNWIND range(0, size(rels)-1) AS i
+            RETURN {{
+                first_node: nodes[i].name,
+                relation: rels[i].type,
+                second_node: nodes[i+1].name,
+                original_form: rels[i].original_form,
+                pos_tag: rels[i].pos_tag
+            }} AS triplet
+            """
+            
+            resp = session.execute(nGQL_query)
+            if not resp.is_succeeded():
+                print(f"Error executing query: {resp.error_msg()}")
+                session.release()
+                connection_pool.close()
+                return []
+            
+            subgraph_triplets = []
+            for row in resp.rows():
+                subgraph_triplets.append(eval(row[0]))
+        
+        # Release the session back to the pool
+        session.release()
+        
+        # Close the connection pool
+        connection_pool.close()
+        
+        return subgraph_triplets
+        
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        return []
+
+def get_subgraph_from_database(nodes: List[str], relations: List[str], depth: int = 2) -> List[Dict[str, str]]:
+    """
+    Extract a subgraph from the specified graph database(s) based on given nodes and relations.
+    
+    Args:
+        nodes: List of nodes to start from
+        relations: List of relations to consider
+        depth: Depth of traversal (default: 2)
+        
+    Returns:
+        List of triplets representing the subgraph, including original forms metadata
+    """
+    # Load environment variables
+    load_dotenv()
+    
+    # Get the database type from environment variables
+    db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    
+    # Get subgraph from the specified database(s)
+    if db_type == 'neo4j':
+        return get_subgraph_from_neo4j(nodes, relations, depth)
+    elif db_type == 'nebula':
+        return get_subgraph_from_nebula(nodes, relations, depth)
+    elif db_type == 'both':
+        # Get subgraph from both databases and combine results
+        neo4j_subgraph = get_subgraph_from_neo4j(nodes, relations, depth)
+        nebula_subgraph = get_subgraph_from_nebula(nodes, relations, depth)
+        
+        # Combine results and remove duplicates
+        all_triplets = {str(triplet) for triplet in neo4j_subgraph + nebula_subgraph}
+        combined_subgraph = [eval(triplet) for triplet in all_triplets]
+        
+        return combined_subgraph
+    else:
+        raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
 # Example usage
 if __name__ == "__main__":
