@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, replace_pronouns_with_previous_nodes
+from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -61,6 +61,7 @@ def clear_neo4j_database():
 def clear_nebula_database():
     """
     Clear all vertices and edges from the Nebula Graph database.
+    If the space doesn't exist, create it with appropriate configuration.
     """
     try:
         # Load environment variables
@@ -90,29 +91,70 @@ def clear_nebula_database():
         # Get a session from the pool
         session = connection_pool.get_session(user, password)
         
-        # Use the specified space
-        resp = session.execute(f"USE {space}")
-        if not resp.is_succeeded():
-            print(f"Space {space} doesn't exist. No need to clear.")
+        try:
+            # Check if space exists
+            resp = session.execute(f"SHOW SPACES")
+            if not resp.is_succeeded():
+                raise Exception(f"Failed to list spaces: {resp.error_msg()}")
+            
+            spaces = [row.values[0] for row in resp.rows()]
+            space_exists = space in spaces
+            
+            if not space_exists:
+                # Create space if it doesn't exist
+                create_space_query = f"""
+                CREATE SPACE IF NOT EXISTS {space}(
+                    partition_num=10, 
+                    replica_factor=3, 
+                    vid_type=FIXED_STRING(128)
+                )"""
+                
+                resp = session.execute(create_space_query)
+                if not resp.is_succeeded():
+                    raise Exception(f"Failed to create space: {resp.error_msg()}")
+                
+                print(f"Space '{space}' created")
+                
+                # Wait longer for the space to be ready (10 seconds)
+                print("Waiting for space to be ready...")
+                session.execute("SLEEP 10")
+            else:
+                print(f"Space '{space}' already exists")
+            
+            # Try to use the space
+            resp = session.execute(f"USE {space}")
+            if not resp.is_succeeded():
+                raise Exception(f"Failed to use space: {resp.error_msg()}")
+            
+            # Clear all vertices and edges if they exist - using Nebula Graph syntax
+            # First, get all tags and edge types
+            resp = session.execute("SHOW TAGS")
+            if resp.is_succeeded():
+                tags = [row.values[0] for row in resp.rows()]
+                for tag in tags:
+                    # Delete vertices with this tag
+                    resp = session.execute(f"DELETE VERTEX {tag}")
+                    if not resp.is_succeeded():
+                        print(f"Warning: Failed to delete vertices with tag {tag}: {resp.error_msg()}")
+            
+            resp = session.execute("SHOW EDGES")
+            if resp.is_succeeded():
+                edges = [row.values[0] for row in resp.rows()]
+                for edge in edges:
+                    # Delete edges with this type
+                    resp = session.execute(f"DELETE EDGE {edge}")
+                    if not resp.is_succeeded():
+                        print(f"Warning: Failed to delete edges with type {edge}: {resp.error_msg()}")
+            
+            print(f"Successfully initialized/cleared space '{space}'")
+            
+        finally:
+            # Always release the session and close the pool
             session.release()
             connection_pool.close()
-            return
-        
-        # Clear all vertices and edges
-        resp = session.execute("MATCH (v) DETACH DELETE v")
-        if not resp.is_succeeded():
-            print(f"Warning: Failed to clear Nebula Graph database: {resp.error_msg()}")
-        
-        # Release the session back to the pool
-        session.release()
-        
-        # Close the connection pool
-        connection_pool.close()
-        
-        print("Successfully cleared Nebula Graph database")
         
     except Exception as e:
-        print(f"An error occurred while clearing the Nebula Graph database: {str(e)}")
+        print(f"Error in clear_nebula_database: {str(e)}")
         raise
 
 def clear_graph_database():
@@ -223,11 +265,6 @@ async def create_knowledge_graph(input_data: FileInput):
             print("Processing triplets with lemmatization...")
             processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
             print(f"Processed {len(processed_triplets)} triplets")
-            
-            # Replace pronouns with previous nodes
-            print("Replacing pronouns with previous nodes...")
-            processed_triplets = replace_pronouns_with_previous_nodes(processed_triplets)
-            print(f"Processed {len(processed_triplets)} triplets after pronoun replacement")
             
             # Upload to the specified graph database(s)
             print("Uploading to graph database...")

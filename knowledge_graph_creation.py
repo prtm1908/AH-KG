@@ -10,6 +10,7 @@ import os
 import torch
 from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
+import hashlib
 
 def create_triplets_spacy_fastcoref(text):
     print("\nStarting create_triplets_spacy_fastcoref")
@@ -142,72 +143,6 @@ def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple
     print(f"Processed {len(processed_triplets)} triplets")
     return processed_triplets, dict(relation_tracking)
 
-def replace_pronouns_with_previous_nodes(triplets: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    print("\nStarting replace_pronouns_with_previous_nodes")
-    # List of pronouns to check (case-insensitive)
-    pronouns = {
-        # First-person singular
-        "i", "me", "my", "mine", "myself",
-
-        # First-person plural
-        "we", "us", "our", "ours", "ourselves", "ourself",
-
-        # Second-person (singular & plural)
-        "you", "your", "yours", "yourself", "yourselves",
-
-        # Third-person singular
-        "he", "she", "it", "they",  
-        "him", "her", "them",  
-        "his", "hers", "its", "their", "theirs",
-        "himself", "herself", "itself", "themselves", "themself",
-
-        # Gender-neutral & nonbinary pronouns
-        "ze", "hir", "hirs", "hirself",
-        "xe", "xem", "xyr", "xyrs", "xemself",
-        "ey", "em", "eir", "eirs", "eirself",
-        "ve", "ver", "vis", "vers", "verself",
-        "ne", "nem", "nir", "nirs", "nirself",
-        "tey", "ter", "tem", "ters", "terself",
-        "hu", "hum", "hus", "huself",
-        "per", "pers", "perself",
-
-        # Archaic & rare pronouns
-        "thon", "thons", "oneself"
-    }
-    
-    processed_triplets = []
-    replaced_count = 0  # Track number of triplets with pronouns replaced
-    
-    for i, triplet in enumerate(triplets):
-        processed_triplet = triplet.copy()
-        
-        # Check if both nodes are pronouns
-        first_is_pronoun = triplet['first_node'].lower() in pronouns
-        second_is_pronoun = triplet['second_node'].lower() in pronouns
-        
-        if i > 0:
-            if first_is_pronoun and second_is_pronoun:
-                # If both are pronouns, use first node for first pronoun and second node for second pronoun
-                processed_triplet['first_node'] = processed_triplets[i-1]['first_node']
-                processed_triplet['second_node'] = processed_triplets[i-1]['second_node']
-                print(f"Replaced both pronouns '{triplet['first_node']}' and '{triplet['second_node']}' with '{processed_triplet['first_node']}' and '{processed_triplet['second_node']}'")
-                replaced_count += 1
-            else:
-                # Handle single pronoun cases
-                if first_is_pronoun:
-                    processed_triplet['first_node'] = processed_triplets[i-1]['second_node']
-                    print(f"Replaced pronoun '{triplet['first_node']}' with '{processed_triplet['first_node']}' in first node")
-                    replaced_count += 1
-                if second_is_pronoun:
-                    processed_triplet['second_node'] = processed_triplets[i-1]['second_node']
-                    print(f"Replaced pronoun '{triplet['second_node']}' with '{processed_triplet['second_node']}' in second node")
-                    replaced_count += 1
-        
-        processed_triplets.append(processed_triplet)
-    
-    print(f"Replaced pronouns in {replaced_count} triplets")
-    return processed_triplets
-
 def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     print("\nStarting upload_to_neo4j")
     try:
@@ -334,6 +269,91 @@ def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str
         if not resp.is_succeeded():
             raise ValueError(f"Space {space} doesn't exist or cannot be accessed: {resp.error_msg()}")
         
+        # Collect all unique vertex labels and edge types
+        vertex_labels = set()
+        edge_types = set()
+        
+        for triplet in triplets:
+            # Convert entity names to valid label names
+            subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
+            object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
+            
+            # Ensure labels start with a letter
+            if not subject_label[0].isalpha():
+                subject_label = 'E_' + subject_label
+            if not object_label[0].isalpha():
+                object_label = 'E_' + object_label
+            
+            # Remove consecutive underscores and trailing underscores
+            subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
+            object_label = re.sub(r'_+', '_', object_label).rstrip('_')
+            
+            # Add to vertex labels set
+            vertex_labels.add(subject_label)
+            vertex_labels.add(object_label)
+            
+            # Convert relation to valid Nebula Graph identifier
+            rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
+            if not rel_type[0].isalpha():
+                rel_type = 'REL_' + rel_type
+            rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
+            
+            # Add to edge types set
+            edge_types.add(rel_type)
+        
+        # Create vertex tags
+        print("Creating vertex tags...")
+        for label in vertex_labels:
+            create_tag_query = f"""
+            CREATE TAG IF NOT EXISTS {label}(
+                name string,
+                text string,
+                caption string,
+                displayName string,
+                title string
+            )
+            """
+            resp = session.execute(create_tag_query)
+            if not resp.is_succeeded():
+                print(f"Warning: Failed to create tag {label}: {resp.error_msg()}")
+        
+        # Create edge types
+        print("Creating edge types...")
+        for edge_type in edge_types:
+            create_edge_query = f"""
+            CREATE EDGE IF NOT EXISTS {edge_type}(
+                type string,
+                name string,
+                caption string,
+                original_form string,
+                pos_tag string,
+                strength double
+            )
+            """
+            resp = session.execute(create_edge_query)
+            if not resp.is_succeeded():
+                print(f"Warning: Failed to create edge type {edge_type}: {resp.error_msg()}")
+        
+        # Wait for schema to be ready (at least 20 seconds as per documentation)
+        print("Waiting for schema to be ready (20 seconds)...")
+        session.execute("SLEEP 20")
+        
+        # Verify that all tags and edges were created
+        print("Verifying schema creation...")
+        resp = session.execute("SHOW TAGS")
+        if resp.is_succeeded():
+            created_tags = [row.values[0] for row in resp.rows()]
+            missing_tags = [tag for tag in vertex_labels if tag not in created_tags]
+            if missing_tags:
+                print(f"Warning: The following tags were not created: {missing_tags}")
+        
+        resp = session.execute("SHOW EDGES")
+        if resp.is_succeeded():
+            created_edges = [row.values[0] for row in resp.rows()]
+            missing_edges = [edge for edge in edge_types if edge not in created_edges]
+            if missing_edges:
+                print(f"Warning: The following edge types were not created: {missing_edges}")
+        
         print("Starting to upload triplets to Nebula Graph...")
         # Create nodes and relationships
         for triplet in triplets:
@@ -365,22 +385,35 @@ def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str
             original_form = original_forms[0][0] if original_forms else triplet['relation']
             pos_tag = original_forms[0][1] if original_forms else 'VERB'
             
-            # Create nodes with properties
+            # Escape quotes in strings to prevent SQL injection and syntax errors
+            first_node = triplet['first_node'].replace('"', '\\"')
+            second_node = triplet['second_node'].replace('"', '\\"')
+            relation = triplet['relation'].replace('"', '\\"')
+            original_form = original_form.replace('"', '\\"')
+            
+            # Generate unique vertex IDs for subject and object
+            # Using a hash of the node name to create a unique ID
+            subject_id = f"v_{int(hashlib.sha256(first_node.encode()).hexdigest()[:8], 16) % 1000000}"
+            object_id = f"v_{int(hashlib.sha256(second_node.encode()).hexdigest()[:8], 16) % 1000000}"
+            
+            # Create nodes with properties - using proper Nebula Graph syntax
+            # The vertex ID is separate from the tag properties
             subject_query = f"""
             INSERT VERTEX IF NOT EXISTS {subject_label}(name, text, caption, displayName, title) 
-            VALUES "{triplet['first_node']}":("{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}", "{triplet['first_node']}")
+            VALUES "{subject_id}":("{first_node}", "{first_node}", "{first_node}", "{first_node}", "{first_node}")
             """
             
             object_query = f"""
             INSERT VERTEX IF NOT EXISTS {object_label}(name, text, caption, displayName, title) 
-            VALUES "{triplet['second_node']}":("{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}", "{triplet['second_node']}")
+            VALUES "{object_id}":("{second_node}", "{second_node}", "{second_node}", "{second_node}", "{second_node}")
             """
             
-            # Create edge with properties
+            # Create edge with properties - using proper Nebula Graph syntax
+            # Use the vertex IDs for the FROM and TO clauses
             edge_query = f"""
-            INSERT EDGE IF NOT EXISTS {rel_type}(type, name, caption, original_form, pos_tag, strength) 
-            FROM "{triplet['first_node']}" TO "{triplet['second_node']}" 
-            VALUES ("{triplet['relation']}", "{triplet['relation']}", "{triplet['relation']}", "{original_form}", "{pos_tag}", 1.0)
+            INSERT EDGE {rel_type}(type, name, caption, original_form, pos_tag, strength) 
+            FROM "{subject_id}" TO "{object_id}" 
+            VALUES ("{relation}", "{relation}", "{relation}", "{original_form}", "{pos_tag}", 1.0)
             """
             
             # Execute queries
@@ -396,17 +429,15 @@ def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str
             if not resp.is_succeeded():
                 print(f"Error creating edge: {resp.error_msg()}")
         
-        # Release the session back to the pool
-        session.release()
-        
-        # Close the connection pool
-        connection_pool.close()
-        
         print("Successfully uploaded knowledge graph to Nebula Graph")
         
+        # Release the session back to the pool
+        session.release()
+        connection_pool.close()
+        
     except Exception as e:
-        print(f"An error occurred: {str(e)}")
-        raise  # Re-raise the exception to be handled by the API endpoint
+        print(f"Error in upload_to_nebula: {str(e)}")
+        raise
 
 def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     """
