@@ -53,7 +53,18 @@ def create_triplets_spacy_fastcoref(text):
         print(f"Error during CUDA processing: {str(e)}")
         # If any error occurs (including CUDA errors), retry with CPU
         print("Retrying with CPU...")
-        nlp.get_pipe("fastcoref").config['device'] = 'cpu'
+        # Remove the existing FastCoref component
+        if "fastcoref" in nlp.pipe_names:
+            nlp.remove_pipe("fastcoref")
+        # Add FastCoref to the pipeline with CPU configuration
+        nlp.add_pipe(
+            "fastcoref", 
+            config={
+                'model_architecture': 'LingMessCoref',
+                'model_path': 'biu-nlp/lingmess-coref',
+                'device': 'cpu'
+            }
+        )
         print("Processing text with CPU...")
         doc = nlp(text, component_cfg={"fastcoref": {'resolve_text': True}})
         print("Successfully processed text with CPU")
