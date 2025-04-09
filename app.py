@@ -18,12 +18,14 @@ app = FastAPI(
 
 class FileInput(BaseModel):
     file_path: str
+    is_url: bool = False
 
 class SubgraphQuery(BaseModel):
     query: str
 
 class CombinedInput(BaseModel):
     file_path: str
+    is_url: bool = False
     query: str
 
 def clear_neo4j_database():
@@ -193,26 +195,36 @@ def clear_graph_database():
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
-def read_text_file(file_path: str) -> str:
+def read_text_file(file_path: str, is_url: bool = False) -> str:
     """
-    Read text from a file.
+    Read text from a file or URL.
     
     Args:
-        file_path: Path to the text file
+        file_path: Path to the text file or URL
+        is_url: Boolean indicating if file_path is a URL
         
     Returns:
         Content of the text file as string
         
     Raises:
-        HTTPException: If file doesn't exist or can't be read
+        HTTPException: If file doesn't exist or can't be read, or if URL is invalid
     """
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-    try:
-        with open(file_path, 'r', encoding='utf-8') as file:
-            return file.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+    if is_url:
+        try:
+            import requests
+            response = requests.get(file_path)
+            response.raise_for_status()  # Raise an exception for HTTP errors
+            return response.text
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error fetching URL: {str(e)}")
+    else:
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+        try:
+            with open(file_path, 'r', encoding='utf-8') as file:
+                return file.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
 
 def process_text_in_batches(text: str, batch_size: int = 1000) -> List[str]:
     """
@@ -244,11 +256,11 @@ def process_text_in_batches(text: str, batch_size: int = 1000) -> List[str]:
 @app.post("/create-knowledge-graph", response_model=Dict[str, str])
 async def create_knowledge_graph(input_data: FileInput):
     """
-    Create a knowledge graph from input text file and store it in the specified graph database(s).
+    Create a knowledge graph from input text file or URL and store it in the specified graph database(s).
     Processes text in batches of 1000 sentences.
     
     Args:
-        input_data: FileInput containing the path to the text file
+        input_data: FileInput containing the path to the text file or URL and a flag indicating if it's a URL
         
     Returns:
         Dictionary with success message and processing details
@@ -260,8 +272,8 @@ async def create_knowledge_graph(input_data: FileInput):
         clear_graph_database()
         
         # Read text from file
-        print(f"Reading text from file: {input_data.file_path}")
-        text = read_text_file(input_data.file_path)
+        print(f"Reading text from {'URL' if input_data.is_url else 'file'}: {input_data.file_path}")
+        text = read_text_file(input_data.file_path, input_data.is_url)
         
         # Split text into batches
         print("Splitting text into batches...")
@@ -319,10 +331,10 @@ async def get_subgraph(query_data: SubgraphQuery):
 @app.post("/create-and-query", response_model=Dict[str, List[Dict[str, str]]])
 async def create_and_query(input_data: CombinedInput):
     """
-    Create a knowledge graph from input text file and immediately query it.
+    Create a knowledge graph from input text file or URL and immediately query it.
     
     Args:
-        input_data: CombinedInput containing the path to the text file and the query
+        input_data: CombinedInput containing the path to the text file or URL, a flag indicating if it's a URL, and the query
         
     Returns:
         Dictionary containing both the created knowledge graph and the retrieved subgraph
@@ -335,7 +347,7 @@ async def create_and_query(input_data: CombinedInput):
         # First create the knowledge graph
         try:
             print("Attempting to create knowledge graph...")
-            await create_knowledge_graph(FileInput(file_path=input_data.file_path))
+            await create_knowledge_graph(FileInput(file_path=input_data.file_path, is_url=input_data.is_url))
             print("Successfully created knowledge graph")
         except Exception as e:
             print(f"Error during knowledge graph creation: {str(e)}")
