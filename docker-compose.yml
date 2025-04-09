@@ -294,5 +294,18 @@ services:
     networks:
       - nebula-net
 
+  studio:
+    image: vesoft/nebula-graph-studio:v3.10.0
+    platform: linux/amd64
+    environment:
+      USER: root
+    ports:
+      - "7001:7001"
+    depends_on:
+      - graphd
+    networks:
+      - nebula-net
+    restart: on-failure
+
 networks:
   nebula-net: 

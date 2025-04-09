@@ -53,11 +53,7 @@ def create_triplets_spacy_fastcoref(text):
         print(f"Error during CUDA processing: {str(e)}")
         # If any error occurs (including CUDA errors), retry with CPU
         print("Retrying with CPU...")
-        
-        # Update FastCoref config to use CPU
         nlp.get_pipe("fastcoref").config['device'] = 'cpu'
-        
-        # Process the text with coreference resolution using CPU
         print("Processing text with CPU...")
         doc = nlp(text, component_cfg={"fastcoref": {'resolve_text': True}})
         print("Successfully processed text with CPU")
@@ -84,16 +80,10 @@ def create_triplets_spacy_fastcoref(text):
         if len(nouns) >= 2 and len(verbs) >= 1:
             # Create triplets for each consecutive pair of nouns
             for i in range(len(nouns) - 1):
-                # Use the first verb for the first triplet, or subsequent verbs for later triplets
                 verb = verbs[min(i, len(verbs) - 1)]
-                
-                # Skip if first_node and second_node are the same
                 if nouns[i].text == nouns[i + 1].text:
                     continue
-                
-                # Create a unique key for this triplet to avoid duplicates
                 triplet_key = f"{nouns[i].text}_{verb.text}_{nouns[i + 1].text}"
-                
                 if triplet_key not in processed_nouns:
                     triplet = {
                         'first_node': nouns[i].text,
@@ -108,37 +98,25 @@ def create_triplets_spacy_fastcoref(text):
 
 def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Dict[str, List[Tuple[str, str]]]]:
     print("\nStarting process_triplets_with_lemmatization")
-    # Load English language model with lemmatizer
     print("Loading spaCy model with lemmatizer...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "ner", "textcat"])
-    
-    # Initialize tracking dictionary
     relation_tracking = defaultdict(list)
-    
-    # Process each triplet
     print("Processing triplets with lemmatization...")
     processed_triplets = []
     for triplet in triplets:
-        # Create a new triplet with the same nodes
         processed_triplet = {
             'first_node': triplet['first_node'],
             'second_node': triplet['second_node']
         }
-        
-        # Process the relation
         relation_doc = nlp(triplet['relation'])
         if len(relation_doc) > 0:
-            # Get the lemmatized form
             lemmatized_relation = relation_doc[0].lemma_
             processed_triplet['relation'] = lemmatized_relation
-            
-            # Track the original form and its POS tag
             relation_tracking[lemmatized_relation].append(
                 (triplet['relation'], relation_doc[0].pos_)
             )
         else:
             processed_triplet['relation'] = triplet['relation']
-        
         processed_triplets.append(processed_triplet)
     
     print(f"Processed {len(processed_triplets)} triplets")
@@ -147,55 +125,34 @@ def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple
 def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     print("\nStarting upload_to_neo4j")
     try:
-        # Load environment variables
         print("Loading environment variables...")
         load_dotenv()
-        
-        # Get Neo4j credentials from environment variables
         uri = os.getenv('NEO4J_URI')
         user = os.getenv('NEO4J_USER')
         password = os.getenv('NEO4J_PASSWORD')
-        
         if not all([uri, user, password]):
             raise ValueError("Missing Neo4j credentials in .env file. Please ensure NEO4J_URI, NEO4J_USER, and NEO4J_PASSWORD are set.")
-        
-        # Create Neo4j driver
         print("Creating Neo4j driver...")
         driver = GraphDatabase.driver(uri, auth=(user, password))
-        
         with driver.session() as session:
             print("Starting to upload triplets to Neo4j...")
-            # Create nodes and relationships
             for triplet in triplets:
-                # Convert entity names to valid label names
                 subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
                 object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
-                
-                # Ensure labels start with a letter
                 if not subject_label[0].isalpha():
                     subject_label = 'E_' + subject_label
                 if not object_label[0].isalpha():
                     object_label = 'E_' + object_label
-                
-                # Remove consecutive underscores and trailing underscores
                 subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
                 object_label = re.sub(r'_+', '_', object_label).rstrip('_')
-                
-                # Convert relation to valid Neo4j identifier
                 rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
                 if not rel_type[0].isalpha():
                     rel_type = 'REL_' + rel_type
                 rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
-                
-                # Get the original forms and POS tags for this relation
                 lemmatized_relation = triplet['relation']
                 original_forms = relation_tracking.get(lemmatized_relation, [])
-                
-                # Store the first original form and POS tag as simple strings
                 original_form = original_forms[0][0] if original_forms else triplet['relation']
                 pos_tag = original_forms[0][1] if original_forms else 'VERB'
-                
-                # Create nodes with labels
                 cypher_query = f"""
                 MERGE (s:{subject_label} {{name: $subject}})
                 SET s.text = $subject
@@ -211,7 +168,6 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
                 SET r.pos_tag = $pos_tag
                 SET r.strength = 1.0
                 """
-                
                 session.run(cypher_query,
                           subject=triplet['first_node'],
                           object=triplet['second_node'],
@@ -219,7 +175,6 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
                           original_form=original_form,
                           pos_tag=pos_tag)
             
-            # Set display settings for all nodes
             print("Setting display settings for nodes...")
             session.run("""
             MATCH (n)
@@ -232,10 +187,10 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
         
     except ServiceUnavailable:
         print("Could not connect to Neo4j database. Please check your connection details.")
-        raise  # Re-raise the exception to be handled by the API endpoint
+        raise
     except Exception as e:
         print(f"An error occurred: {str(e)}")
-        raise  # Re-raise the exception to be handled by the API endpoint
+        raise
 
 def extract_value(v) -> str:
     """
@@ -251,8 +206,6 @@ def extract_value(v) -> str:
 def sanitize_vertex(name: str) -> str:
     """
     Sanitize vertex label names.
-    Converts the input to uppercase, replaces non-alphanumeric characters,
-    and ensures it starts with a letter.
     """
     name = re.sub(r'[^A-Za-z0-9_]', '_', name.upper())
     name = re.sub(r'_+', '_', name).strip('_')
@@ -263,9 +216,6 @@ def sanitize_vertex(name: str) -> str:
 def sanitize_edge(name: str) -> str:
     """
     Sanitize edge type names.
-    Converts the input to uppercase, replaces non-alphanumeric characters,
-    compresses multiple underscores, and prefixes the name with "REL_"
-    to avoid reserved words.
     """
     name = re.sub(r'[^A-Za-z0-9_]', '_', name.upper())
     name = re.sub(r'_+', '_', name).strip('_')
@@ -280,23 +230,20 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
         user = os.getenv('NEBULA_USER')
         password = os.getenv('NEBULA_PASSWORD')
         space = os.getenv('NEBULA_SPACE')
-
+    
         if not all([host, user, password, space]):
             raise ValueError("Missing Nebula Graph credentials")
-
-        from nebula3.gclient.net import ConnectionPool
-        from nebula3.Config import Config
-
+    
         config = Config()
         connection_pool = ConnectionPool()
         assert connection_pool.init([(host, port)], config)
         session = connection_pool.get_session(user, password)
-
+    
         # Use the specified space
         resp = session.execute(f"USE `{space}`")
         if not resp.is_succeeded():
             raise RuntimeError(f"Cannot access space `{space}`: {resp.error_msg()}")
-
+    
         # --- Drop existing tags and edges ---
         resp = session.execute("SHOW TAGS")
         if resp.is_succeeded():
@@ -306,7 +253,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
                 resp_drop = session.execute(drop_query)
                 if not resp_drop.is_succeeded():
                     print(f"Warning: Failed to drop tag {tag}: {resp_drop.error_msg()}")
-
+    
         resp = session.execute("SHOW EDGES")
         if resp.is_succeeded():
             edges = [extract_value(row.values[0]) for row in resp.rows()]
@@ -315,9 +262,9 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
                 resp_drop = session.execute(drop_query)
                 if not resp_drop.is_succeeded():
                     print(f"Warning: Failed to drop edge {edge}: {resp_drop.error_msg()}")
-
+    
         print(f"Successfully initialized/cleared space '{space}'")
-
+    
         # --- Build expected schema ---
         vertex_labels = set()
         edge_types = set()
@@ -325,43 +272,25 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
             vertex_labels.add(sanitize_vertex(triplet['first_node']))
             vertex_labels.add(sanitize_vertex(triplet['second_node']))
             edge_types.add(sanitize_edge(triplet['relation']))
-
+    
         # --- Create vertex tags (schema for vertices) ---
         for label in vertex_labels:
-            query = f"""
-            CREATE TAG IF NOT EXISTS `{label}` (
-                name string,
-                text string,
-                caption string,
-                displayName string,
-                title string
-            )
-            """
+            query = f"CREATE TAG IF NOT EXISTS `{label}` (name string, text string, caption string, displayName string, title string)"
             result = session.execute(query)
             if not result.is_succeeded():
                 print(f"Failed to create tag {label}: {result.error_msg()}")
-
+    
         # --- Create edge types (schema for edges) ---
         for edge in edge_types:
-            query = f"""
-            CREATE EDGE IF NOT EXISTS `{edge}` (
-                type string,
-                name string,
-                caption string,
-                original_form string,
-                pos_tag string,
-                strength double
-            )
-            """
+            query = f"CREATE EDGE IF NOT EXISTS `{edge}` (type string, name string, caption string, original_form string, pos_tag string, strength double)"
             result = session.execute(query)
             if not result.is_succeeded():
                 print(f"Failed to create edge {edge}: {result.error_msg()}")
-
+    
         # --- Wait for schema propagation ---
         def wait_for_schema_propagation(timeout: int = 30) -> bool:
             start_time = time.time()
             while time.time() - start_time < timeout:
-                # Re-issue USE command to ensure we are in the proper space
                 session.execute(f"USE `{space}`")
                 tag_resp = session.execute("SHOW TAGS")
                 current_tags = set()
@@ -375,75 +304,69 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
                     return True
                 time.sleep(2)
             return False
-
+    
         if not wait_for_schema_propagation():
             print("Warning: Schema propagation timed out. Some insertions might fail.")
         else:
             print("Schema propagation successful.")
-
-        # --- Insert vertices and edges ---
-        # (Make sure to re-issue USE space if needed)
+    
+        # --- Re-establish session so that the new schema is recognized ---
+        session.release()
+        session = connection_pool.get_session(user, password)
         session.execute(f"USE `{space}`")
-        import hashlib  # ensure hashlib is imported for hash computation
+        # Added extra delay to ensure the schema is fully visible
+        time.sleep(5)
+    
+        import hashlib
         for triplet in triplets:
             sub_name = triplet['first_node'].replace('"', '\\"')
             obj_name = triplet['second_node'].replace('"', '\\"')
             rel = triplet['relation'].replace('"', '\\"')
-
+    
             sub_label = sanitize_vertex(sub_name)
             obj_label = sanitize_vertex(obj_name)
             edge_type = sanitize_edge(rel)
-
+    
             original_forms = relation_tracking.get(rel, [])
             original_form = original_forms[0][0] if original_forms else rel
             pos_tag = original_forms[0][1] if original_forms else 'VERB'
-
+    
             sub_id = f"v_{int(hashlib.sha256(sub_name.encode()).hexdigest()[:8], 16) % 1000000}"
             obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
-
-            insert_subject = f'''
-            INSERT VERTEX IF NOT EXISTS `{sub_label}`(name, text, caption, displayName, title)
-            VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")
-            '''
-            insert_object = f'''
-            INSERT VERTEX IF NOT EXISTS `{obj_label}`(name, text, caption, displayName, title)
-            VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")
-            '''
-            insert_edge = f'''
-            INSERT EDGE `{edge_type}`(type, name, caption, original_form, pos_tag, strength)
-            VALUES "{sub_id}" -> "{obj_id}": ("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)
-            '''
+    
+            insert_subject = (
+                f'INSERT VERTEX `{sub_label}`(name, text, caption, displayName, title) '
+                f'VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
+            )
+            insert_object = (
+                f'INSERT VERTEX `{obj_label}`(name, text, caption, displayName, title) '
+                f'VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
+            )
+            insert_edge = (
+                f'INSERT EDGE `{edge_type}`(type, name, caption, original_form, pos_tag, strength) '
+                f'VALUES "{sub_id}" -> "{obj_id}": ("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+            )
+    
             for query in [insert_subject, insert_object, insert_edge]:
                 resp = session.execute(query)
                 if not resp.is_succeeded():
                     print(f"Error running query:\n{query}\nReason: {resp.error_msg()}")
-
+    
         print("Successfully uploaded triplets to Nebula Graph.")
         session.release()
         connection_pool.close()
-
+    
     except Exception as e:
         print(f"upload_to_nebula error: {str(e)}")
         raise
 
-
 def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     """
     Upload triplets to the database(s) specified in the DB_TYPE environment variable.
-    
-    Args:
-        triplets: List of triplets to upload
-        relation_tracking: Dictionary mapping lemmatized relations to lists of (original_form, pos_tag) tuples
     """
     print("\nStarting upload_to_database")
-    
-    # Load environment variables
     load_dotenv()
-    
-    # Get the database type from environment variables
     db_type = os.getenv('DB_TYPE', 'neo4j').lower()
-    
-    # Upload to the specified database(s)
     if db_type == 'neo4j':
         upload_to_neo4j(triplets, relation_tracking)
     elif db_type == 'nebula':
@@ -454,16 +377,12 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
-# Example usage
+# Example usage when running this module directly:
 if __name__ == "__main__":
-    sample_text = "John loves playing football. He also enjoys basketball. Mary reads books in the library. She often studies there."
-    # First get the triplets
+    sample_text = ("John loves playing football. He also enjoys basketball. "
+                   "Mary reads books in the library. She often studies there.")
     triplets = create_triplets_spacy_fastcoref(sample_text)
     print("Original triplets:", triplets)
-    
-    # Then process them with lemmatization
     processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
     print("\nProcessed triplets:", processed_triplets)
-    
-    # Upload to the specified database(s)
-    upload_to_database(processed_triplets, relation_tracking) 
+    upload_to_database(processed_triplets, relation_tracking)

@@ -1,38 +1,45 @@
 # Knowledge Graph API
 
-A FastAPI-based service that creates knowledge graphs from text and allows querying them. The service uses spaCy for NLP processing, FastCoref for coreference resolution, and Neo4j for graph storage.
+A FastAPI-based service that creates knowledge graphs from text and allows querying them. The service uses spaCy for NLP processing, FastCoref for coreference resolution, and supports both Neo4j and Nebula Graph for storage.
 
 ## Setup
 
-1. Install the required dependencies:
-```bash
-pip install -r requirements.txt
+1. Set up environment variables in a `.env` file:
 ```
+# Database Type (required)
+DB_TYPE=neo4j  # Options: 'neo4j', 'nebula', or 'both'
 
-2. If you have a CUDA-capable GPU, install CUDA-enabled PyTorch:
-```bash
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
-Note: Replace `cu118` with your CUDA version (e.g., `cu117` for CUDA 11.7)
-
-3. Download the required spaCy model:
-```bash
-python -m spacy download en_core_web_sm
-```
-
-4. Set up environment variables in a `.env` file:
-```
+# Neo4j Configuration (required if DB_TYPE is 'neo4j' or 'both')
 NEO4J_URI=your_neo4j_uri
 NEO4J_USER=your_neo4j_username
 NEO4J_PASSWORD=your_neo4j_password
+
+# Nebula Graph Configuration (required if DB_TYPE is 'nebula' or 'both')
+NEBULA_HOST=your_nebula_host
+NEBULA_PORT=9669  # Default port, can be changed
+NEBULA_USER=your_nebula_username
+NEBULA_PASSWORD=your_nebula_password
+NEBULA_SPACE=your_nebula_space
+
+# Nebula Graph Service Configuration (optional)
+NEBULA_META_SERVER_ADDRS=metad0:9559,metad1:9559,metad2:9559  # Meta server addresses
+NEBULA_LOCAL_IP=graphd  # Local IP for graphd service
+NEBULA_WS_IP=graphd  # WebSocket IP for graphd service
+NEBULA_PORT=9669  # Graphd service port
+NEBULA_WS_HTTP_PORT=19669  # WebSocket HTTP port
+NEBULA_LOG_DIR=/logs  # Log directory
 ```
 
-5. Start the FastAPI server:
+2. Build and start the services:
 ```bash
-python app.py
+# Build the services first
+docker compose build
+
+# Then start them
+docker compose up
 ```
 
-The server will start on `http://localhost:8000`
+The API will be available at `http://localhost:8000`
 
 ## API Endpoints
 
