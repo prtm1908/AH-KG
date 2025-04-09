@@ -45,12 +45,20 @@ The API will be available at `http://localhost:8000`
 
 ### 1. Create Knowledge Graph
 - **Endpoint**: `POST /create-knowledge-graph`
-- **Input**: JSON with `file_path` pointing to your text file
-- **Description**: Creates a knowledge graph from the input text file and stores it in Neo4j
+- **Input**: JSON with `file_path` pointing to your text file or URL, and `is_url` flag
+- **Description**: Creates a knowledge graph from the input text file or URL and stores it in Neo4j
 - **Example Request**:
 ```json
 {
-    "file_path": "path/to/your/text/file.txt"
+    "file_path": "path/to/your/text/file.txt",
+    "is_url": false
+}
+```
+- **Example Request with URL**:
+```json
+{
+    "file_path": "https://www.gutenberg.org/cache/epub/1228/pg1228.txt",
+    "is_url": true
 }
 ```
 
@@ -67,12 +75,21 @@ The API will be available at `http://localhost:8000`
 
 ### 3. Create and Query
 - **Endpoint**: `POST /create-and-query`
-- **Input**: JSON with `file_path` and `query`
-- **Description**: Creates a knowledge graph from the input text file and immediately queries it
+- **Input**: JSON with `file_path` and `query`, and optional `is_url` flag
+- **Description**: Creates a knowledge graph from the input text file or URL and immediately queries it
 - **Example Request**:
 ```json
 {
     "file_path": "path/to/your/text/file.txt",
+    "is_url": false,
     "query": "your query here"
+}
+```
+- **Example Request with URL**:
+```json
+{
+    "file_path": "https://www.gutenberg.org/cache/epub/1228/pg1228.txt",
+    "is_url": true,
+    "query": "What is natural selection?"
 }
 ```
