@@ -226,7 +226,7 @@ def read_text_file(file_path: str, is_url: bool = False) -> str:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
 
-def process_text_in_batches(text: str, batch_size: int = 100) -> List[str]:
+def process_text_in_batches(text: str, batch_size: int = 50) -> List[str]:
     """
     Split text into batches of sentences using regex.
     
