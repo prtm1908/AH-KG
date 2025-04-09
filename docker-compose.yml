@@ -14,6 +14,7 @@ services:
 
   metad0:
     image: vesoft/nebula-metad:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -48,6 +49,7 @@ services:
 
   metad1:
     image: vesoft/nebula-metad:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -82,6 +84,7 @@ services:
 
   metad2:
     image: vesoft/nebula-metad:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -116,6 +119,7 @@ services:
 
   storaged0:
     image: vesoft/nebula-storaged:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -154,6 +158,7 @@ services:
 
   storaged1:
     image: vesoft/nebula-storaged:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -192,6 +197,7 @@ services:
 
   storaged2:
     image: vesoft/nebula-storaged:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -230,6 +236,7 @@ services:
 
   graphd:
     image: vesoft/nebula-graphd:v3.0.0
+    platform: linux/amd64
     environment:
       USER: root
       TZ:   "${TZ:-UTC}"
@@ -248,10 +255,10 @@ services:
       - storaged2
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://graphd:19669/status"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
     ports:
       - "9669:9669"
       - 19669
@@ -266,16 +273,24 @@ services:
 
   console:
     image: vesoft/nebula-console:v3.0.0
+    platform: linux/amd64
     entrypoint: ""
-    command: 
+    command:
       - sh
       - -c
       - |
-        sleep 3 &&
+        echo "Waiting for graphd to be ready..." &&
+        for i in $(seq 1 20); do
+          nc -z graphd 9669 && break
+          echo "Retrying... ($i)" && sleep 2
+        done &&
+        echo "Connected to graphd. Running ADD HOSTS..." &&
         nebula-console -addr graphd -port 9669 -u root -p nebula -e 'ADD HOSTS "storaged0":9779,"storaged1":9779,"storaged2":9779' &&
+        echo "Done. Sleeping..." &&
         sleep 36000
     depends_on:
-      - graphd
+      graphd:
+        condition: service_healthy
     networks:
       - nebula-net
 

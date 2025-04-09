@@ -11,6 +11,7 @@ import torch
 from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
 import hashlib
+import time
 
 def create_triplets_spacy_fastcoref(text):
     print("\nStarting create_triplets_spacy_fastcoref")
@@ -236,76 +237,99 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
         print(f"An error occurred: {str(e)}")
         raise  # Re-raise the exception to be handled by the API endpoint
 
-def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
+def extract_value(v) -> str:
+    """
+    Extract the inner string from Nebula Graph Value objects.
+    For example, turns "Value(sVal=b'AGREEMENT')" into "AGREEMENT".
+    """
+    s = str(v)
+    match = re.search(r"b'(.+?)'", s)
+    if match:
+        return match.group(1)
+    return s
+
+def sanitize_vertex(name: str) -> str:
+    """
+    Sanitize vertex label names.
+    Converts the input to uppercase, replaces non-alphanumeric characters,
+    and ensures it starts with a letter.
+    """
+    name = re.sub(r'[^A-Za-z0-9_]', '_', name.upper())
+    name = re.sub(r'_+', '_', name).strip('_')
+    if not name or not name[0].isalpha():
+        name = 'E_' + name
+    return name
+
+def sanitize_edge(name: str) -> str:
+    """
+    Sanitize edge type names.
+    Converts the input to uppercase, replaces non-alphanumeric characters,
+    compresses multiple underscores, and prefixes the name with "REL_"
+    to avoid reserved words.
+    """
+    name = re.sub(r'[^A-Za-z0-9_]', '_', name.upper())
+    name = re.sub(r'_+', '_', name).strip('_')
+    return "REL_" + name if name else "REL_UNKNOWN"
+
+def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
     print("\nStarting upload_to_nebula")
     try:
-        # Load environment variables
-        print("Loading environment variables...")
         load_dotenv()
-        
-        # Get Nebula Graph credentials from environment variables
         host = os.getenv('NEBULA_HOST')
         port = int(os.getenv('NEBULA_PORT', '9669'))
         user = os.getenv('NEBULA_USER')
         password = os.getenv('NEBULA_PASSWORD')
         space = os.getenv('NEBULA_SPACE')
-        
+
         if not all([host, user, password, space]):
-            raise ValueError("Missing Nebula Graph credentials in .env file. Please ensure NEBULA_HOST, NEBULA_USER, NEBULA_PASSWORD, and NEBULA_SPACE are set.")
-        
-        # Create Nebula Graph connection pool
-        print("Creating Nebula Graph connection pool...")
+            raise ValueError("Missing Nebula Graph credentials")
+
+        from nebula3.gclient.net import ConnectionPool
+        from nebula3.Config import Config
+
         config = Config()
         connection_pool = ConnectionPool()
-        
-        # Initialize the connection pool
         assert connection_pool.init([(host, port)], config)
-        
-        # Get a session from the pool
         session = connection_pool.get_session(user, password)
-        
+
         # Use the specified space
-        resp = session.execute(f"USE {space}")
+        resp = session.execute(f"USE `{space}`")
         if not resp.is_succeeded():
-            raise ValueError(f"Space {space} doesn't exist or cannot be accessed: {resp.error_msg()}")
-        
-        # Collect all unique vertex labels and edge types
+            raise RuntimeError(f"Cannot access space `{space}`: {resp.error_msg()}")
+
+        # --- Drop existing tags and edges ---
+        resp = session.execute("SHOW TAGS")
+        if resp.is_succeeded():
+            tags = [extract_value(row.values[0]) for row in resp.rows()]
+            for tag in tags:
+                drop_query = f"DROP TAG IF EXISTS `{tag}`"
+                resp_drop = session.execute(drop_query)
+                if not resp_drop.is_succeeded():
+                    print(f"Warning: Failed to drop tag {tag}: {resp_drop.error_msg()}")
+
+        resp = session.execute("SHOW EDGES")
+        if resp.is_succeeded():
+            edges = [extract_value(row.values[0]) for row in resp.rows()]
+            for edge in edges:
+                drop_query = f"DROP EDGE IF EXISTS `{edge}`"
+                resp_drop = session.execute(drop_query)
+                if not resp_drop.is_succeeded():
+                    print(f"Warning: Failed to drop edge {edge}: {resp_drop.error_msg()}")
+
+        print(f"Successfully initialized/cleared space '{space}'")
+
+        # --- Build expected schema ---
         vertex_labels = set()
         edge_types = set()
-        
         for triplet in triplets:
-            # Convert entity names to valid label names
-            subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
-            object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
-            
-            # Ensure labels start with a letter
-            if not subject_label[0].isalpha():
-                subject_label = 'E_' + subject_label
-            if not object_label[0].isalpha():
-                object_label = 'E_' + object_label
-            
-            # Remove consecutive underscores and trailing underscores
-            subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
-            object_label = re.sub(r'_+', '_', object_label).rstrip('_')
-            
-            # Add to vertex labels set
-            vertex_labels.add(subject_label)
-            vertex_labels.add(object_label)
-            
-            # Convert relation to valid Nebula Graph identifier
-            rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
-            if not rel_type[0].isalpha():
-                rel_type = 'REL_' + rel_type
-            rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
-            
-            # Add to edge types set
-            edge_types.add(rel_type)
-        
-        # Create vertex tags
-        print("Creating vertex tags...")
+            vertex_labels.add(sanitize_vertex(triplet['first_node']))
+            vertex_labels.add(sanitize_vertex(triplet['second_node']))
+            edge_types.add(sanitize_edge(triplet['relation']))
+
+        # --- Create vertex tags (schema for vertices) ---
         for label in vertex_labels:
-            create_tag_query = f"""
-            CREATE TAG IF NOT EXISTS {label}(
+            query = f"""
+            CREATE TAG IF NOT EXISTS `{label}` (
                 name string,
                 text string,
                 caption string,
@@ -313,15 +337,14 @@ def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str
                 title string
             )
             """
-            resp = session.execute(create_tag_query)
-            if not resp.is_succeeded():
-                print(f"Warning: Failed to create tag {label}: {resp.error_msg()}")
-        
-        # Create edge types
-        print("Creating edge types...")
-        for edge_type in edge_types:
-            create_edge_query = f"""
-            CREATE EDGE IF NOT EXISTS {edge_type}(
+            result = session.execute(query)
+            if not result.is_succeeded():
+                print(f"Failed to create tag {label}: {result.error_msg()}")
+
+        # --- Create edge types (schema for edges) ---
+        for edge in edge_types:
+            query = f"""
+            CREATE EDGE IF NOT EXISTS `{edge}` (
                 type string,
                 name string,
                 caption string,
@@ -330,114 +353,79 @@ def upload_to_nebula(triplets: List[Dict[str, str]], relation_tracking: Dict[str
                 strength double
             )
             """
-            resp = session.execute(create_edge_query)
-            if not resp.is_succeeded():
-                print(f"Warning: Failed to create edge type {edge_type}: {resp.error_msg()}")
-        
-        # Wait for schema to be ready (at least 20 seconds as per documentation)
-        print("Waiting for schema to be ready (20 seconds)...")
-        session.execute("SLEEP 20")
-        
-        # Verify that all tags and edges were created
-        print("Verifying schema creation...")
-        resp = session.execute("SHOW TAGS")
-        if resp.is_succeeded():
-            created_tags = [row.values[0] for row in resp.rows()]
-            missing_tags = [tag for tag in vertex_labels if tag not in created_tags]
-            if missing_tags:
-                print(f"Warning: The following tags were not created: {missing_tags}")
-        
-        resp = session.execute("SHOW EDGES")
-        if resp.is_succeeded():
-            created_edges = [row.values[0] for row in resp.rows()]
-            missing_edges = [edge for edge in edge_types if edge not in created_edges]
-            if missing_edges:
-                print(f"Warning: The following edge types were not created: {missing_edges}")
-        
-        print("Starting to upload triplets to Nebula Graph...")
-        # Create nodes and relationships
+            result = session.execute(query)
+            if not result.is_succeeded():
+                print(f"Failed to create edge {edge}: {result.error_msg()}")
+
+        # --- Wait for schema propagation ---
+        def wait_for_schema_propagation(timeout: int = 30) -> bool:
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                # Re-issue USE command to ensure we are in the proper space
+                session.execute(f"USE `{space}`")
+                tag_resp = session.execute("SHOW TAGS")
+                current_tags = set()
+                if tag_resp.is_succeeded():
+                    current_tags = set(extract_value(row.values[0]) for row in tag_resp.rows())
+                edge_resp = session.execute("SHOW EDGES")
+                current_edges = set()
+                if edge_resp.is_succeeded():
+                    current_edges = set(extract_value(row.values[0]) for row in edge_resp.rows())
+                if vertex_labels.issubset(current_tags) and edge_types.issubset(current_edges):
+                    return True
+                time.sleep(2)
+            return False
+
+        if not wait_for_schema_propagation():
+            print("Warning: Schema propagation timed out. Some insertions might fail.")
+        else:
+            print("Schema propagation successful.")
+
+        # --- Insert vertices and edges ---
+        # (Make sure to re-issue USE space if needed)
+        session.execute(f"USE `{space}`")
+        import hashlib  # ensure hashlib is imported for hash computation
         for triplet in triplets:
-            # Convert entity names to valid label names
-            subject_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['first_node'].upper())
-            object_label = re.sub(r'[^A-Za-z0-9_]', '_', triplet['second_node'].upper())
-            
-            # Ensure labels start with a letter
-            if not subject_label[0].isalpha():
-                subject_label = 'E_' + subject_label
-            if not object_label[0].isalpha():
-                object_label = 'E_' + object_label
-            
-            # Remove consecutive underscores and trailing underscores
-            subject_label = re.sub(r'_+', '_', subject_label).rstrip('_')
-            object_label = re.sub(r'_+', '_', object_label).rstrip('_')
-            
-            # Convert relation to valid Nebula Graph identifier
-            rel_type = re.sub(r'[^A-Za-z0-9_]', '_', triplet['relation'].upper())
-            if not rel_type[0].isalpha():
-                rel_type = 'REL_' + rel_type
-            rel_type = re.sub(r'_+', '_', rel_type).rstrip('_')
-            
-            # Get the original forms and POS tags for this relation
-            lemmatized_relation = triplet['relation']
-            original_forms = relation_tracking.get(lemmatized_relation, [])
-            
-            # Store the first original form and POS tag as simple strings
-            original_form = original_forms[0][0] if original_forms else triplet['relation']
+            sub_name = triplet['first_node'].replace('"', '\\"')
+            obj_name = triplet['second_node'].replace('"', '\\"')
+            rel = triplet['relation'].replace('"', '\\"')
+
+            sub_label = sanitize_vertex(sub_name)
+            obj_label = sanitize_vertex(obj_name)
+            edge_type = sanitize_edge(rel)
+
+            original_forms = relation_tracking.get(rel, [])
+            original_form = original_forms[0][0] if original_forms else rel
             pos_tag = original_forms[0][1] if original_forms else 'VERB'
-            
-            # Escape quotes in strings to prevent SQL injection and syntax errors
-            first_node = triplet['first_node'].replace('"', '\\"')
-            second_node = triplet['second_node'].replace('"', '\\"')
-            relation = triplet['relation'].replace('"', '\\"')
-            original_form = original_form.replace('"', '\\"')
-            
-            # Generate unique vertex IDs for subject and object
-            # Using a hash of the node name to create a unique ID
-            subject_id = f"v_{int(hashlib.sha256(first_node.encode()).hexdigest()[:8], 16) % 1000000}"
-            object_id = f"v_{int(hashlib.sha256(second_node.encode()).hexdigest()[:8], 16) % 1000000}"
-            
-            # Create nodes with properties - using proper Nebula Graph syntax
-            # The vertex ID is separate from the tag properties
-            subject_query = f"""
-            INSERT VERTEX IF NOT EXISTS {subject_label}(name, text, caption, displayName, title) 
-            VALUES "{subject_id}":("{first_node}", "{first_node}", "{first_node}", "{first_node}", "{first_node}")
-            """
-            
-            object_query = f"""
-            INSERT VERTEX IF NOT EXISTS {object_label}(name, text, caption, displayName, title) 
-            VALUES "{object_id}":("{second_node}", "{second_node}", "{second_node}", "{second_node}", "{second_node}")
-            """
-            
-            # Create edge with properties - using proper Nebula Graph syntax
-            # Use the vertex IDs for the FROM and TO clauses
-            edge_query = f"""
-            INSERT EDGE {rel_type}(type, name, caption, original_form, pos_tag, strength) 
-            FROM "{subject_id}" TO "{object_id}" 
-            VALUES ("{relation}", "{relation}", "{relation}", "{original_form}", "{pos_tag}", 1.0)
-            """
-            
-            # Execute queries
-            resp = session.execute(subject_query)
-            if not resp.is_succeeded():
-                print(f"Error creating subject node: {resp.error_msg()}")
-            
-            resp = session.execute(object_query)
-            if not resp.is_succeeded():
-                print(f"Error creating object node: {resp.error_msg()}")
-            
-            resp = session.execute(edge_query)
-            if not resp.is_succeeded():
-                print(f"Error creating edge: {resp.error_msg()}")
-        
-        print("Successfully uploaded knowledge graph to Nebula Graph")
-        
-        # Release the session back to the pool
+
+            sub_id = f"v_{int(hashlib.sha256(sub_name.encode()).hexdigest()[:8], 16) % 1000000}"
+            obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
+
+            insert_subject = f'''
+            INSERT VERTEX IF NOT EXISTS `{sub_label}`(name, text, caption, displayName, title)
+            VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")
+            '''
+            insert_object = f'''
+            INSERT VERTEX IF NOT EXISTS `{obj_label}`(name, text, caption, displayName, title)
+            VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")
+            '''
+            insert_edge = f'''
+            INSERT EDGE `{edge_type}`(type, name, caption, original_form, pos_tag, strength)
+            VALUES "{sub_id}" -> "{obj_id}": ("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)
+            '''
+            for query in [insert_subject, insert_object, insert_edge]:
+                resp = session.execute(query)
+                if not resp.is_succeeded():
+                    print(f"Error running query:\n{query}\nReason: {resp.error_msg()}")
+
+        print("Successfully uploaded triplets to Nebula Graph.")
         session.release()
         connection_pool.close()
-        
+
     except Exception as e:
-        print(f"Error in upload_to_nebula: {str(e)}")
+        print(f"upload_to_nebula error: {str(e)}")
         raise
+
 
 def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
     """

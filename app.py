@@ -8,6 +8,7 @@ import os
 from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
+import time
 
 app = FastAPI(
     title="Knowledge Graph API",
@@ -58,104 +59,118 @@ def clear_neo4j_database():
         print(f"An error occurred while clearing the database: {str(e)}")
         raise
 
+
+def extract_value(v) -> str:
+    """
+    Extract the inner string from Nebula Graph Value objects.
+    For example, turns "Value(sVal=b'AGREEMENT')" into "AGREEMENT".
+    """
+    s = str(v)
+    match = re.search(r"b'(.+?)'", s)
+    if match:
+        return match.group(1)
+    return s
+
 def clear_nebula_database():
     """
     Clear all vertices and edges from the Nebula Graph database.
-    If the space doesn't exist, create it with appropriate configuration.
+    If the space doesn't exist, create it. If it exists, clean it.
     """
     try:
-        # Load environment variables
         load_dotenv()
-        
-        # Get Nebula Graph credentials from environment variables
+
         host = os.getenv('NEBULA_HOST')
         port = int(os.getenv('NEBULA_PORT', '9669'))
         user = os.getenv('NEBULA_USER')
         password = os.getenv('NEBULA_PASSWORD')
         space = os.getenv('NEBULA_SPACE')
-        
+
         if not all([host, user, password, space]):
             raise ValueError("Missing Nebula Graph credentials in .env file")
-        
-        # Import Nebula Graph modules
+
         from nebula3.gclient.net import ConnectionPool
         from nebula3.Config import Config
-        
-        # Create Nebula Graph connection pool
+
         config = Config()
         connection_pool = ConnectionPool()
-        
-        # Initialize the connection pool
         assert connection_pool.init([(host, port)], config)
-        
-        # Get a session from the pool
+
         session = connection_pool.get_session(user, password)
-        
+
         try:
-            # Check if space exists
-            resp = session.execute(f"SHOW SPACES")
+            # Check existing spaces
+            resp = session.execute("SHOW SPACES")
             if not resp.is_succeeded():
                 raise Exception(f"Failed to list spaces: {resp.error_msg()}")
-            
-            spaces = [row.values[0] for row in resp.rows()]
+
+            spaces = [str(row.values[0]) for row in resp.rows()]
             space_exists = space in spaces
-            
+
             if not space_exists:
-                # Create space if it doesn't exist
-                create_space_query = f"""
-                CREATE SPACE IF NOT EXISTS {space}(
-                    partition_num=10, 
-                    replica_factor=3, 
-                    vid_type=FIXED_STRING(128)
-                )"""
-                
-                resp = session.execute(create_space_query)
+                create_query = (
+                    f"CREATE SPACE {space} ("
+                    f"partition_num = 10, replica_factor = 1, vid_type = FIXED_STRING(30))"
+                )
+                resp = session.execute(create_query)
                 if not resp.is_succeeded():
-                    raise Exception(f"Failed to create space: {resp.error_msg()}")
-                
-                print(f"Space '{space}' created")
-                
-                # Wait longer for the space to be ready (10 seconds)
+                    # Handle "Existed!" message
+                    if "Existed!" in resp.error_msg():
+                        print(f"Space '{space}' already existed (error message). Continuing...")
+                    else:
+                        raise Exception(f"Failed to create space: {resp.error_msg()}")
+                else:
+                    print(f"Space '{space}' created")
+
                 print("Waiting for space to be ready...")
-                session.execute("SLEEP 10")
+                # Wait until we can USE the space
+                for attempt in range(10):
+                    time.sleep(1)
+                    resp = session.execute(f"USE {space}")
+                    if resp.is_succeeded():
+                        print(f"Space '{space}' is now available and in use.")
+                        break
+                    else:
+                        print(f"Waiting for space '{space}' to be ready... (Attempt {attempt+1})")
+                else:
+                    raise Exception(f"Space '{space}' not ready after waiting")
             else:
                 print(f"Space '{space}' already exists")
-            
-            # Try to use the space
+
+            # Use the space
             resp = session.execute(f"USE {space}")
             if not resp.is_succeeded():
                 raise Exception(f"Failed to use space: {resp.error_msg()}")
-            
-            # Clear all vertices and edges if they exist - using Nebula Graph syntax
-            # First, get all tags and edge types
+
+            # Drop tags (use extract_value to get the proper tag name and wrap with backticks)
             resp = session.execute("SHOW TAGS")
             if resp.is_succeeded():
-                tags = [row.values[0] for row in resp.rows()]
+                tags = [extract_value(row.values[0]) for row in resp.rows()]
                 for tag in tags:
-                    # Delete vertices with this tag
-                    resp = session.execute(f"DELETE VERTEX {tag}")
-                    if not resp.is_succeeded():
-                        print(f"Warning: Failed to delete vertices with tag {tag}: {resp.error_msg()}")
-            
+                    drop_query = f"DROP TAG IF EXISTS `{tag}`"
+                    resp_drop = session.execute(drop_query)
+                    if not resp_drop.is_succeeded():
+                        print(f"Warning: Failed to drop tag {tag}: {resp_drop.error_msg()}")
+
+            # Drop edges (similarly use extract_value and backticks)
             resp = session.execute("SHOW EDGES")
             if resp.is_succeeded():
-                edges = [row.values[0] for row in resp.rows()]
+                edges = [extract_value(row.values[0]) for row in resp.rows()]
                 for edge in edges:
-                    # Delete edges with this type
-                    resp = session.execute(f"DELETE EDGE {edge}")
-                    if not resp.is_succeeded():
-                        print(f"Warning: Failed to delete edges with type {edge}: {resp.error_msg()}")
-            
+                    drop_query = f"DROP EDGE IF EXISTS `{edge}`"
+                    resp_drop = session.execute(drop_query)
+                    if not resp_drop.is_succeeded():
+                        print(f"Warning: Failed to drop edge {edge}: {resp_drop.error_msg()}")
+
             print(f"Successfully initialized/cleared space '{space}'")
-            
+
         finally:
-            # Always release the session and close the pool
             session.release()
             connection_pool.close()
-        
+
     except Exception as e:
         print(f"Error in clear_nebula_database: {str(e)}")
         raise
+
 
 def clear_graph_database():
     """
