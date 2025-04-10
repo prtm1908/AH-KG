@@ -325,46 +325,45 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
         depth: Depth of traversal (default: 2)
         
     Returns:
-        List of triplets representing the subgraph, including original forms metadata
+        List of triplets representing the subgraph
     """
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
+    
+    # Get Nebula Graph credentials from environment variables
+    host = os.getenv('NEBULA_HOST')
+    port = int(os.getenv('NEBULA_PORT', '9669'))
+    user = os.getenv('NEBULA_USER')
+    password = os.getenv('NEBULA_PASSWORD')
+    space = os.getenv('NEBULA_SPACE')
+    
+    if not all([host, user, password, space]):
+        print("Error: Missing Nebula Graph credentials in .env file")
+        print(f"Host: {'Present' if host else 'Missing'}")
+        print(f"User: {'Present' if user else 'Missing'}")
+        print(f"Password: {'Present' if password else 'Missing'}")
+        print(f"Space: {'Present' if space else 'Missing'}")
+        raise ValueError("Missing Nebula Graph credentials in .env file")
+    
+    print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+    
     try:
-        # Load environment variables
-        load_dotenv()
-        
-        # Get Nebula Graph credentials
-        host = os.getenv('NEBULA_HOST')
-        port = int(os.getenv('NEBULA_PORT', '9669'))
-        user = os.getenv('NEBULA_USER')
-        password = os.getenv('NEBULA_PASSWORD')
-        space = os.getenv('NEBULA_SPACE')
-        
-        if not all([host, user, password, space]):
-            print("Error: Missing Nebula Graph credentials in .env file")
-            print(f"Host: {'Present' if host else 'Missing'}")
-            print(f"User: {'Present' if user else 'Missing'}")
-            print(f"Password: {'Present' if password else 'Missing'}")
-            print(f"Space: {'Present' if space else 'Missing'}")
-            raise ValueError("Missing Nebula Graph credentials in .env file")
-        
-        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
-        
         # Create Nebula Graph connection pool
         config = Config()
         connection_pool = ConnectionPool()
         
         # Initialize the connection pool
-        assert connection_pool.init([(host, port)], config)
+        init_result = connection_pool.init([(host, port)], config)
+        if not init_result:
+            raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
         
         # Get a session from the pool
         session = connection_pool.get_session(user, password)
         
-        # Use the specified space
+        # Use the space
         resp = session.execute(f"USE {space}")
         if not resp.is_succeeded():
-            print(f"Space {space} doesn't exist or cannot be accessed: {resp.error_msg()}")
-            session.release()
-            connection_pool.close()
-            return []
+            raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
         
         subgraph_triplets = []
         
@@ -514,27 +513,20 @@ def get_subgraph_from_database(nodes: List[str], relations: List[str], depth: in
     Returns:
         List of triplets representing the subgraph, including original forms metadata
     """
-    # Load environment variables
-    load_dotenv()
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
     
     # Get the database type from environment variables
     db_type = os.getenv('DB_TYPE', 'neo4j').lower()
     
-    # Get subgraph from the specified database(s)
+    # Extract subgraph from the specified database(s)
     if db_type == 'neo4j':
         return get_subgraph_from_neo4j(nodes, relations, depth)
     elif db_type == 'nebula':
         return get_subgraph_from_nebula(nodes, relations, depth)
     elif db_type == 'both':
-        # Get subgraph from both databases and combine results
-        neo4j_subgraph = get_subgraph_from_neo4j(nodes, relations, depth)
-        nebula_subgraph = get_subgraph_from_nebula(nodes, relations, depth)
-        
-        # Combine results and remove duplicates
-        all_triplets = {str(triplet) for triplet in neo4j_subgraph + nebula_subgraph}
-        combined_subgraph = [eval(triplet) for triplet in all_triplets]
-        
-        return combined_subgraph
+        # For 'both', we'll use Neo4j as the primary source
+        return get_subgraph_from_neo4j(nodes, relations, depth)
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 

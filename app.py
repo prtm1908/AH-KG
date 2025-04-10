@@ -33,8 +33,8 @@ def clear_neo4j_database():
     Clear all nodes and relationships from the Neo4j database.
     """
     try:
-        # Load environment variables
-        load_dotenv()
+        # Load environment variables with override=True to force reload
+        load_dotenv(override=True)
         
         # Get Neo4j credentials from environment variables
         uri = os.getenv('NEO4J_URI')
@@ -79,7 +79,17 @@ def clear_nebula_database():
     If the space doesn't exist, create it. If it exists, clean it.
     """
     try:
-        load_dotenv()
+        # Load environment variables with override=True to force reload
+        load_dotenv(override=True)
+        
+        # Print all environment variables for debugging
+        print("Environment variables:")
+        print(f"NEBULA_HOST: {os.getenv('NEBULA_HOST')}")
+        print(f"NEBULA_PORT: {os.getenv('NEBULA_PORT')}")
+        print(f"NEBULA_USER: {os.getenv('NEBULA_USER')}")
+        print(f"NEBULA_PASSWORD: {os.getenv('NEBULA_PASSWORD')}")
+        print(f"NEBULA_SPACE: {os.getenv('NEBULA_SPACE')}")
+        print(f"DB_TYPE: {os.getenv('DB_TYPE')}")
 
         host = os.getenv('NEBULA_HOST')
         port = int(os.getenv('NEBULA_PORT', '9669'))
@@ -88,14 +98,27 @@ def clear_nebula_database():
         space = os.getenv('NEBULA_SPACE')
 
         if not all([host, user, password, space]):
-            raise ValueError("Missing Nebula Graph credentials in .env file")
+            error_msg = "Missing Nebula Graph credentials in .env file"
+            print(f"Error: {error_msg}")
+            print(f"Host: {'Present' if host else 'Missing'}")
+            print(f"User: {'Present' if user else 'Missing'}")
+            print(f"Password: {'Present' if password else 'Missing'}")
+            print(f"Space: {'Present' if space else 'Missing'}")
+            raise ValueError(error_msg)
 
+        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
         from nebula3.gclient.net import ConnectionPool
         from nebula3.Config import Config
 
         config = Config()
         connection_pool = ConnectionPool()
-        assert connection_pool.init([(host, port)], config)
+        
+        # Initialize the connection pool with better error handling
+        init_result = connection_pool.init([(host, port)], config)
+        if not init_result:
+            error_msg = f"Failed to initialize connection pool to Nebula Graph at {host}:{port}"
+            print(f"Error: {error_msg}")
+            raise ConnectionError(error_msg)
 
         session = connection_pool.get_session(user, password)
 
@@ -103,7 +126,9 @@ def clear_nebula_database():
             # Check existing spaces
             resp = session.execute("SHOW SPACES")
             if not resp.is_succeeded():
-                raise Exception(f"Failed to list spaces: {resp.error_msg()}")
+                error_msg = f"Failed to list spaces: {resp.error_msg()}"
+                print(f"Error: {error_msg}")
+                raise Exception(error_msg)
 
             spaces = [str(row.values[0]) for row in resp.rows()]
             space_exists = space in spaces
@@ -119,7 +144,9 @@ def clear_nebula_database():
                     if "Existed!" in resp.error_msg():
                         print(f"Space '{space}' already existed (error message). Continuing...")
                     else:
-                        raise Exception(f"Failed to create space: {resp.error_msg()}")
+                        error_msg = f"Failed to create space: {resp.error_msg()}"
+                        print(f"Error: {error_msg}")
+                        raise Exception(error_msg)
                 else:
                     print(f"Space '{space}' created")
 
@@ -134,14 +161,18 @@ def clear_nebula_database():
                     else:
                         print(f"Waiting for space '{space}' to be ready... (Attempt {attempt+1})")
                 else:
-                    raise Exception(f"Space '{space}' not ready after waiting")
+                    error_msg = f"Space '{space}' not ready after waiting"
+                    print(f"Error: {error_msg}")
+                    raise Exception(error_msg)
             else:
                 print(f"Space '{space}' already exists")
 
             # Use the space
             resp = session.execute(f"USE {space}")
             if not resp.is_succeeded():
-                raise Exception(f"Failed to use space: {resp.error_msg()}")
+                error_msg = f"Failed to use space: {resp.error_msg()}"
+                print(f"Error: {error_msg}")
+                raise Exception(error_msg)
 
             # Drop tags (use extract_value to get the proper tag name and wrap with backticks)
             resp = session.execute("SHOW TAGS")
@@ -170,16 +201,17 @@ def clear_nebula_database():
             connection_pool.close()
 
     except Exception as e:
-        print(f"Error in clear_nebula_database: {str(e)}")
-        raise
+        error_msg = f"Error in clear_nebula_database: {str(e)}"
+        print(error_msg)
+        raise Exception(error_msg)
 
 
 def clear_graph_database():
     """
     Clear all nodes and relationships from the specified graph database(s).
     """
-    # Load environment variables
-    load_dotenv()
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
     
     # Get the database type from environment variables
     db_type = os.getenv('DB_TYPE', 'neo4j').lower()
@@ -269,11 +301,23 @@ async def create_knowledge_graph(input_data: FileInput):
         print("Starting create_knowledge_graph function")
         # Clear the existing database first
         print("Clearing graph database...")
-        clear_graph_database()
+        try:
+            clear_graph_database()
+            print("Successfully cleared graph database")
+        except Exception as e:
+            error_msg = f"Error clearing graph database: {str(e)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Read text from file
         print(f"Reading text from {'URL' if input_data.is_url else 'file'}: {input_data.file_path}")
-        text = read_text_file(input_data.file_path, input_data.is_url)
+        try:
+            text = read_text_file(input_data.file_path, input_data.is_url)
+            print(f"Successfully read text, length: {len(text)} characters")
+        except Exception as e:
+            error_msg = f"Error reading text: {str(e)}"
+            print(error_msg)
+            raise HTTPException(status_code=500, detail=error_msg)
         
         # Split text into batches
         print("Splitting text into batches...")
@@ -285,27 +329,46 @@ async def create_knowledge_graph(input_data: FileInput):
             print(f"\nProcessing batch {i}/{len(batches)}")
             # Create triplets from batch
             print("Creating triplets...")
-            triplets = create_triplets_spacy_fastcoref(batch)
-            print(f"Created {len(triplets)} triplets")
+            try:
+                triplets = create_triplets_spacy_fastcoref(batch)
+                print(f"Created {len(triplets)} triplets")
+            except Exception as e:
+                error_msg = f"Error creating triplets: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
             
             # Process triplets with lemmatization
             print("Processing triplets with lemmatization...")
-            processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
-            print(f"Processed {len(processed_triplets)} triplets")
+            try:
+                processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
+                print(f"Processed {len(processed_triplets)} triplets")
+            except Exception as e:
+                error_msg = f"Error processing triplets: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
             
             # Upload to the specified graph database(s)
             print("Uploading to graph database...")
-            upload_to_database(processed_triplets, relation_tracking)
-            print("Successfully uploaded to graph database")
+            try:
+                upload_to_database(processed_triplets, relation_tracking)
+                print("Successfully uploaded to graph database")
+            except Exception as e:
+                error_msg = f"Error uploading to database: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
         
         print("Successfully completed all batches")
         return {
             "status": "success",
             "message": f"Successfully processed {len(batches)} batches of text and uploaded to graph database"
         }
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        print(f"Error in create_knowledge_graph: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = f"Unexpected error in create_knowledge_graph: {str(e)}"
+        print(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/get-subgraph", response_model=List[Dict[str, str]])
 async def get_subgraph(query_data: SubgraphQuery):
@@ -355,19 +418,31 @@ async def create_and_query(input_data: CombinedInput):
                 # If it's a CUDA error, we can still proceed with the query
                 print("CUDA error during graph creation, but continuing with query...")
             else:
-                raise e
+                # Provide more detailed error information
+                error_detail = f"Error during knowledge graph creation: {str(e)}"
+                print(error_detail)
+                raise HTTPException(status_code=500, detail=error_detail)
         
         # Then get the subgraph
-        print("Attempting to get subgraph...")
-        subgraph = await get_subgraph(SubgraphQuery(query=input_data.query))
-        print("Successfully retrieved subgraph")
-        
-        return {
-            "subgraph": subgraph
-        }
+        try:
+            print("Attempting to get subgraph...")
+            subgraph = await get_subgraph(SubgraphQuery(query=input_data.query))
+            print("Successfully retrieved subgraph")
+            
+            return {
+                "subgraph": subgraph
+            }
+        except Exception as e:
+            error_detail = f"Error during subgraph retrieval: {str(e)}"
+            print(error_detail)
+            raise HTTPException(status_code=500, detail=error_detail)
+            
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
         print(f"Error in create_and_query: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

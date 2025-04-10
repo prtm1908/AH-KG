@@ -230,31 +230,54 @@ def sanitize_edge(name: str) -> str:
     """
     name = re.sub(r'[^A-Za-z0-9_]', '_', name.upper())
     name = re.sub(r'_+', '_', name).strip('_')
-    return "REL_" + name if name else "REL_UNKNOWN"
+    return name if name else "REL_UNKNOWN"
 
 def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
-    print("\nStarting upload_to_nebula")
+    """
+    Upload triplets to Nebula Graph.
+    
+    Args:
+        triplets: List of triplets to upload
+        relation_tracking: Dictionary tracking relations and their original forms
+    """
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
+    
+    # Get Nebula Graph credentials
+    host = os.getenv('NEBULA_HOST')
+    port = int(os.getenv('NEBULA_PORT', '9669'))
+    user = os.getenv('NEBULA_USER')
+    password = os.getenv('NEBULA_PASSWORD')
+    space = os.getenv('NEBULA_SPACE')
+    
+    if not all([host, user, password, space]):
+        print("Error: Missing Nebula Graph credentials in .env file")
+        print(f"Host: {'Present' if host else 'Missing'}")
+        print(f"User: {'Present' if user else 'Missing'}")
+        print(f"Password: {'Present' if password else 'Missing'}")
+        print(f"Space: {'Present' if space else 'Missing'}")
+        raise ValueError("Missing Nebula Graph credentials in .env file")
+    
+    print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+    
     try:
-        load_dotenv()
-        host = os.getenv('NEBULA_HOST')
-        port = int(os.getenv('NEBULA_PORT', '9669'))
-        user = os.getenv('NEBULA_USER')
-        password = os.getenv('NEBULA_PASSWORD')
-        space = os.getenv('NEBULA_SPACE')
-    
-        if not all([host, user, password, space]):
-            raise ValueError("Missing Nebula Graph credentials")
-    
+        # Create Nebula Graph connection pool
         config = Config()
         connection_pool = ConnectionPool()
-        assert connection_pool.init([(host, port)], config)
+        
+        # Initialize the connection pool
+        init_result = connection_pool.init([(host, port)], config)
+        if not init_result:
+            raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
+        
+        # Get a session from the pool
         session = connection_pool.get_session(user, password)
-    
-        # Use the specified space
-        resp = session.execute(f"USE `{space}`")
+        
+        # Use the space
+        resp = session.execute(f"USE {space}")
         if not resp.is_succeeded():
-            raise RuntimeError(f"Cannot access space `{space}`: {resp.error_msg()}")
-    
+            raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
+        
         # --- Drop existing tags and edges ---
         resp = session.execute("SHOW TAGS")
         if resp.is_succeeded():
@@ -284,85 +307,124 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
             vertex_labels.add(sanitize_vertex(triplet['second_node']))
             edge_types.add(sanitize_edge(triplet['relation']))
     
-        # --- Create vertex tags (schema for vertices) ---
-        for label in vertex_labels:
-            query = f"CREATE TAG IF NOT EXISTS `{label}` (name string, text string, caption string, displayName string, title string)"
-            result = session.execute(query)
-            if not result.is_succeeded():
-                print(f"Failed to create tag {label}: {result.error_msg()}")
-    
-        # --- Create edge types (schema for edges) ---
-        for edge in edge_types:
-            query = f"CREATE EDGE IF NOT EXISTS `{edge}` (type string, name string, caption string, original_form string, pos_tag string, strength double)"
-            result = session.execute(query)
-            if not result.is_succeeded():
-                print(f"Failed to create edge {edge}: {result.error_msg()}")
-    
-        # --- Wait for schema propagation ---
-        def wait_for_schema_propagation(timeout: int = 30) -> bool:
+        # --- Create vertex tags and insert vertices ---
+        # Track created tags to avoid duplicates
+        created_tags = set()
+        
+        # Helper function to wait for a specific tag to be available
+        def wait_for_tag(tag_name, timeout=30):
             start_time = time.time()
             while time.time() - start_time < timeout:
                 session.execute(f"USE `{space}`")
                 tag_resp = session.execute("SHOW TAGS")
-                current_tags = set()
                 if tag_resp.is_succeeded():
                     current_tags = set(extract_value(row.values[0]) for row in tag_resp.rows())
+                    if tag_name in current_tags:
+                        print(f"Tag {tag_name} found, waiting additional 10 seconds for propagation...")
+                        time.sleep(10)  # Wait 10 seconds after tag is found
+                        return True
+                time.sleep(1)
+            return False
+        
+        # Helper function to wait for a specific edge to be available
+        def wait_for_edge(edge_name, timeout=30):
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                session.execute(f"USE `{space}`")
                 edge_resp = session.execute("SHOW EDGES")
-                current_edges = set()
                 if edge_resp.is_succeeded():
                     current_edges = set(extract_value(row.values[0]) for row in edge_resp.rows())
-                if vertex_labels.issubset(current_tags) and edge_types.issubset(current_edges):
-                    return True
-                time.sleep(2)
+                    if edge_name in current_edges:
+                        print(f"Edge {edge_name} found, waiting additional 10 seconds for propagation...")
+                        time.sleep(10)  # Wait 10 seconds after edge is found
+                        return True
+                time.sleep(1)
             return False
-    
-        if not wait_for_schema_propagation():
-            print("Warning: Schema propagation timed out. Some insertions might fail.")
-        else:
-            print("Schema propagation successful.")
-    
-        # --- Re-establish session so that the new schema is recognized ---
-        session.release()
-        session = connection_pool.get_session(user, password)
-        session.execute(f"USE `{space}`")
-        # Added extra delay to ensure the schema is fully visible
-        time.sleep(5)
-    
+        
+        # Process each triplet
         import hashlib
         for triplet in triplets:
-            sub_name = triplet['first_node'].replace('"', '\\"')
-            obj_name = triplet['second_node'].replace('"', '\\"')
-            rel = triplet['relation'].replace('"', '\\"')
-    
+            sub_name = triplet['first_node']
+            obj_name = triplet['second_node']
+            rel = triplet['relation']
+            
+            # Sanitize names
             sub_label = sanitize_vertex(sub_name)
             obj_label = sanitize_vertex(obj_name)
-            edge_type = sanitize_edge(rel)
-    
+            rel_type = sanitize_edge(rel)
+            
+            # Create and wait for subject tag if not already created
+            if sub_label not in created_tags:
+                query = f"CREATE TAG IF NOT EXISTS {sub_label} (name string, text string, caption string, displayName string, title string)"
+                result = session.execute(query)
+                if not result.is_succeeded():
+                    print(f"Failed to create tag {sub_label}: {result.error_msg()}")
+                else:
+                    print(f"Created tag {sub_label}, waiting for propagation...")
+                    if wait_for_tag(sub_label):
+                        print(f"Tag {sub_label} is available")
+                        created_tags.add(sub_label)
+                    else:
+                        print(f"Warning: Tag {sub_label} propagation timed out")
+            
+            # Create and wait for object tag if not already created
+            if obj_label not in created_tags:
+                query = f"CREATE TAG IF NOT EXISTS {obj_label} (name string, text string, caption string, displayName string, title string)"
+                result = session.execute(query)
+                if not result.is_succeeded():
+                    print(f"Failed to create tag {obj_label}: {result.error_msg()}")
+                else:
+                    print(f"Created tag {obj_label}, waiting for propagation...")
+                    if wait_for_tag(obj_label):
+                        print(f"Tag {obj_label} is available")
+                        created_tags.add(obj_label)
+                    else:
+                        print(f"Warning: Tag {obj_label} propagation timed out")
+            
+            # Create and wait for edge type
+            query = f"CREATE EDGE IF NOT EXISTS {rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
+            result = session.execute(query)
+            if not result.is_succeeded():
+                print(f"Failed to create edge {rel_type}: {result.error_msg()}")
+            else:
+                print(f"Created edge {rel_type}, waiting for propagation...")
+                if wait_for_edge(rel_type):
+                    print(f"Edge {rel_type} is available")
+                else:
+                    print(f"Warning: Edge {rel_type} propagation timed out")
+            
+            # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
             original_form = original_forms[0][0] if original_forms else rel
             pos_tag = original_forms[0][1] if original_forms else 'VERB'
-    
+            
             sub_id = f"v_{int(hashlib.sha256(sub_name.encode()).hexdigest()[:8], 16) % 1000000}"
             obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
-    
+            
+            # Insert subject vertex
             insert_subject = (
-                f'INSERT VERTEX `{sub_label}`(name, text, caption, displayName, title) '
-                f'VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
+                f'INSERT VERTEX {sub_label} (name, text, caption, displayName, title) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
             )
+            resp = session.execute(insert_subject)
+            if not resp.is_succeeded():
+                print(f"Error inserting subject vertex:\n{insert_subject}\nReason: {resp.error_msg()}")
+            
+            # Insert object vertex
             insert_object = (
-                f'INSERT VERTEX `{obj_label}`(name, text, caption, displayName, title) '
-                f'VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
+                f'INSERT VERTEX {obj_label} (name, text, caption, displayName, title) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
             )
+            resp = session.execute(insert_object)
+            if not resp.is_succeeded():
+                print(f"Error inserting object vertex:\n{insert_object}\nReason: {resp.error_msg()}")
+            
+            # Insert edge
             insert_edge = (
-                f'INSERT EDGE `{edge_type}`(type, name, caption, original_form, pos_tag, strength) '
-                f'VALUES "{sub_id}" -> "{obj_id}": ("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+                f'INSERT EDGE {rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
             )
-    
-            for query in [insert_subject, insert_object, insert_edge]:
-                resp = session.execute(query)
-                if not resp.is_succeeded():
-                    print(f"Error running query:\n{query}\nReason: {resp.error_msg()}")
-    
+            resp = session.execute(insert_edge)
+            if not resp.is_succeeded():
+                print(f"Error inserting edge:\n{insert_edge}\nReason: {resp.error_msg()}")
+        
         print("Successfully uploaded triplets to Nebula Graph.")
         session.release()
         connection_pool.close()
@@ -375,9 +437,13 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
     """
     Upload triplets to the database(s) specified in the DB_TYPE environment variable.
     """
-    print("\nStarting upload_to_database")
-    load_dotenv()
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
+    
+    # Get the database type from environment variables
     db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    
+    # Upload to the specified database(s)
     if db_type == 'neo4j':
         upload_to_neo4j(triplets, relation_tracking)
     elif db_type == 'nebula':
