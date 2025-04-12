@@ -316,7 +316,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         created_tags = set()
         
         # Helper function to wait for a specific tag to be available
-        def wait_for_tag(tag_name, timeout=30, wait_after_found=30):
+        def wait_for_tag(tag_name, timeout=30):
             start_time = time.time()
             while time.time() - start_time < timeout:
                 session.execute(f"USE `{space}`")
@@ -324,14 +324,14 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 if tag_resp.is_succeeded():
                     current_tags = set(extract_value(row.values[0]) for row in tag_resp.rows())
                     if tag_name in current_tags:
-                        print(f"Tag {tag_name} found, waiting additional {wait_after_found} seconds for propagation...")
-                        time.sleep(wait_after_found)  # Wait for the specified time after tag is found
+                        print(f"Tag {tag_name} found, waiting additional 10 seconds for propagation...")
+                        time.sleep(10)  # Wait 10 seconds after tag is found
                         return True
                 time.sleep(1)
             return False
         
         # Helper function to wait for a specific edge to be available
-        def wait_for_edge(edge_name, timeout=30, wait_after_found=30):
+        def wait_for_edge(edge_name, timeout=30):
             start_time = time.time()
             while time.time() - start_time < timeout:
                 session.execute(f"USE `{space}`")
@@ -339,21 +339,10 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 if edge_resp.is_succeeded():
                     current_edges = set(extract_value(row.values[0]) for row in edge_resp.rows())
                     if edge_name in current_edges:
-                        print(f"Edge {edge_name} found, waiting additional {wait_after_found} seconds for propagation...")
-                        time.sleep(wait_after_found)  # Wait for the specified time after edge is found
+                        print(f"Edge {edge_name} found, waiting additional 10 seconds for propagation...")
+                        time.sleep(10)  # Wait 10 seconds after edge is found
                         return True
                 time.sleep(1)
-            return False
-        
-        # Helper function to retry with increasing wait times
-        def retry_with_increasing_wait(func, *args, max_retries=5, initial_wait=30):
-            wait_time = initial_wait
-            for attempt in range(max_retries):
-                result = func(*args, wait_after_found=wait_time)
-                if result:
-                    return True
-                print(f"Attempt {attempt+1} failed, increasing wait time to {wait_time+10} seconds...")
-                wait_time += 10
             return False
         
         # Process each triplet
@@ -374,28 +363,13 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 result = session.execute(query)
                 if not result.is_succeeded():
                     print(f"Failed to create tag {sub_label}: {result.error_msg()}")
-                    # Add VER_ prefix and retry
-                    prefixed_sub_label = f"VER_{sub_label}"
-                    print(f"Retrying with prefixed tag name: {prefixed_sub_label}")
-                    query = f"CREATE TAG IF NOT EXISTS {prefixed_sub_label} (name string, text string, caption string, displayName string, title string)"
-                    result = session.execute(query)
-                    if not result.is_succeeded():
-                        print(f"Failed to create prefixed tag {prefixed_sub_label}: {result.error_msg()}")
-                    else:
-                        print(f"Created prefixed tag {prefixed_sub_label}, waiting for propagation...")
-                        if retry_with_increasing_wait(wait_for_tag, prefixed_sub_label):
-                            print(f"Tag {prefixed_sub_label} is available")
-                            created_tags.add(prefixed_sub_label)
-                            sub_label = prefixed_sub_label  # Update the label for later use
-                        else:
-                            print(f"Warning: Tag {prefixed_sub_label} propagation timed out after all retries")
                 else:
                     print(f"Created tag {sub_label}, waiting for propagation...")
-                    if retry_with_increasing_wait(wait_for_tag, sub_label):
+                    if wait_for_tag(sub_label):
                         print(f"Tag {sub_label} is available")
                         created_tags.add(sub_label)
                     else:
-                        print(f"Warning: Tag {sub_label} propagation timed out after all retries")
+                        print(f"Warning: Tag {sub_label} propagation timed out")
             
             # Create and wait for object tag if not already created
             if obj_label not in created_tags:
@@ -403,54 +377,25 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 result = session.execute(query)
                 if not result.is_succeeded():
                     print(f"Failed to create tag {obj_label}: {result.error_msg()}")
-                    # Add VER_ prefix and retry
-                    prefixed_obj_label = f"VER_{obj_label}"
-                    print(f"Retrying with prefixed tag name: {prefixed_obj_label}")
-                    query = f"CREATE TAG IF NOT EXISTS {prefixed_obj_label} (name string, text string, caption string, displayName string, title string)"
-                    result = session.execute(query)
-                    if not result.is_succeeded():
-                        print(f"Failed to create prefixed tag {prefixed_obj_label}: {result.error_msg()}")
-                    else:
-                        print(f"Created prefixed tag {prefixed_obj_label}, waiting for propagation...")
-                        if retry_with_increasing_wait(wait_for_tag, prefixed_obj_label):
-                            print(f"Tag {prefixed_obj_label} is available")
-                            created_tags.add(prefixed_obj_label)
-                            obj_label = prefixed_obj_label  # Update the label for later use
-                        else:
-                            print(f"Warning: Tag {prefixed_obj_label} propagation timed out after all retries")
                 else:
                     print(f"Created tag {obj_label}, waiting for propagation...")
-                    if retry_with_increasing_wait(wait_for_tag, obj_label):
+                    if wait_for_tag(obj_label):
                         print(f"Tag {obj_label} is available")
                         created_tags.add(obj_label)
                     else:
-                        print(f"Warning: Tag {obj_label} propagation timed out after all retries")
+                        print(f"Warning: Tag {obj_label} propagation timed out")
             
             # Create and wait for edge type
             query = f"CREATE EDGE IF NOT EXISTS {rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
             result = session.execute(query)
             if not result.is_succeeded():
                 print(f"Failed to create edge {rel_type}: {result.error_msg()}")
-                # Add REL_ prefix and retry
-                prefixed_rel_type = f"REL_{rel_type}"
-                print(f"Retrying with prefixed edge name: {prefixed_rel_type}")
-                query = f"CREATE EDGE IF NOT EXISTS {prefixed_rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
-                result = session.execute(query)
-                if not result.is_succeeded():
-                    print(f"Failed to create prefixed edge {prefixed_rel_type}: {result.error_msg()}")
-                else:
-                    print(f"Created prefixed edge {prefixed_rel_type}, waiting for propagation...")
-                    if retry_with_increasing_wait(wait_for_edge, prefixed_rel_type):
-                        print(f"Edge {prefixed_rel_type} is available")
-                        rel_type = prefixed_rel_type  # Update the edge type for later use
-                    else:
-                        print(f"Warning: Edge {prefixed_rel_type} propagation timed out after all retries")
             else:
                 print(f"Created edge {rel_type}, waiting for propagation...")
-                if retry_with_increasing_wait(wait_for_edge, rel_type):
+                if wait_for_edge(rel_type):
                     print(f"Edge {rel_type} is available")
                 else:
-                    print(f"Warning: Edge {rel_type} propagation timed out after all retries")
+                    print(f"Warning: Edge {rel_type} propagation timed out")
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
