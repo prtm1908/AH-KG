@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database
+from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, upload_to_nebula, upload_to_neo4j
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -9,6 +9,8 @@ from neo4j import GraphDatabase
 from neo4j.exceptions import ServiceUnavailable
 from dotenv import load_dotenv
 import time
+from nebula3.gclient.net import ConnectionPool
+from nebula3.Config import Config
 
 app = FastAPI(
     title="Knowledge Graph API",
@@ -27,6 +29,78 @@ class CombinedInput(BaseModel):
     file_path: str
     is_url: bool = False
     query: str
+
+# Global variables to store Nebula Graph connection
+nebula_connection_pool = None
+nebula_session = None
+
+def get_nebula_connection():
+    """
+    Establish a connection to Nebula Graph and return the session.
+    If a connection already exists, return the existing session.
+    
+    Returns:
+        Tuple of (connection_pool, session)
+    """
+    global nebula_connection_pool, nebula_session
+    
+    # If connection already exists, return it
+    if nebula_connection_pool is not None and nebula_session is not None:
+        return nebula_connection_pool, nebula_session
+    
+    # Load environment variables
+    load_dotenv(override=True)
+    
+    # Get Nebula Graph credentials
+    host = os.getenv('NEBULA_HOST')
+    port = int(os.getenv('NEBULA_PORT', '9669'))
+    user = os.getenv('NEBULA_USER')
+    password = os.getenv('NEBULA_PASSWORD')
+    space = os.getenv('NEBULA_SPACE')
+    
+    if not all([host, user, password, space]):
+        raise ValueError("Missing Nebula Graph credentials in .env file")
+    
+    print(f"Establishing connection to Nebula Graph at {host}:{port}")
+    
+    # Create Nebula Graph connection pool
+    config = Config()
+    connection_pool = ConnectionPool()
+    
+    # Initialize the connection pool
+    init_result = connection_pool.init([(host, port)], config)
+    if not init_result:
+        raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
+    
+    # Get a session from the pool
+    session = connection_pool.get_session(user, password)
+    
+    # Use the space
+    resp = session.execute(f"USE {space}")
+    if not resp.is_succeeded():
+        session.release()
+        connection_pool.close()
+        raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
+    
+    # Store the connection and session globally
+    nebula_connection_pool = connection_pool
+    nebula_session = session
+    
+    return connection_pool, session
+
+def close_nebula_connection():
+    """
+    Close the Nebula Graph connection if it exists.
+    """
+    global nebula_connection_pool, nebula_session
+    
+    if nebula_session is not None:
+        nebula_session.release()
+        nebula_session = None
+    
+    if nebula_connection_pool is not None:
+        nebula_connection_pool.close()
+        nebula_connection_pool = None
 
 def clear_neo4j_database():
     """
@@ -324,6 +398,21 @@ async def create_knowledge_graph(input_data: FileInput):
         batches = process_text_in_batches(text)
         print(f"Created {len(batches)} batches")
         
+        # Get database type
+        db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+        
+        # If using Nebula Graph, establish a connection once for all batches
+        nebula_connection = None
+        nebula_session = None
+        if db_type in ['nebula', 'both']:
+            try:
+                nebula_connection, nebula_session = get_nebula_connection()
+                print("Established Nebula Graph connection for all batches")
+            except Exception as e:
+                error_msg = f"Error establishing Nebula Graph connection: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+        
         # Process each batch
         for i, batch in enumerate(batches, 1):
             print(f"\nProcessing batch {i}/{len(batches)}")
@@ -350,7 +439,15 @@ async def create_knowledge_graph(input_data: FileInput):
             # Upload to the specified graph database(s)
             print("Uploading to graph database...")
             try:
-                upload_to_database(processed_triplets, relation_tracking)
+                if db_type == 'nebula':
+                    upload_to_nebula(processed_triplets, relation_tracking, nebula_session)
+                elif db_type == 'neo4j':
+                    upload_to_neo4j(processed_triplets, relation_tracking)
+                elif db_type == 'both':
+                    upload_to_neo4j(processed_triplets, relation_tracking)
+                    upload_to_nebula(processed_triplets, relation_tracking, nebula_session)
+                else:
+                    raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
                 print("Successfully uploaded to graph database")
             except Exception as e:
                 error_msg = f"Error uploading to database: {str(e)}"
@@ -369,6 +466,10 @@ async def create_knowledge_graph(input_data: FileInput):
         error_msg = f"Unexpected error in create_knowledge_graph: {str(e)}"
         print(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
+    finally:
+        # Close Nebula Graph connection if it was established
+        if db_type in ['nebula', 'both'] and nebula_connection is not None:
+            close_nebula_connection()
 
 @app.post("/get-subgraph", response_model=List[Dict[str, str]])
 async def get_subgraph(query_data: SubgraphQuery):
@@ -383,13 +484,31 @@ async def get_subgraph(query_data: SubgraphQuery):
     """
     try:
         print(f"Processing subgraph query: {query_data.query}")
+        
+        # Get database type
+        db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+        
+        # If using Nebula Graph, establish a connection
+        nebula_session = None
+        if db_type in ['nebula', 'both']:
+            try:
+                _, nebula_session = get_nebula_connection()
+                print("Established Nebula Graph connection for subgraph query")
+            except Exception as e:
+                error_msg = f"Error establishing Nebula Graph connection: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+        
         # Retrieve the relevant subgraph from the existing knowledge graph
-        subgraph = process_query_and_get_subgraph(query_data.query)
+        subgraph = process_query_and_get_subgraph(query_data.query, session=nebula_session)
         print(f"Retrieved subgraph with {len(subgraph)} triplets")
         return subgraph
     except Exception as e:
         print(f"Error in get_subgraph: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # No need to close the connection here as it's managed by the global connection pool
+        pass
 
 @app.post("/create-and-query", response_model=Dict[str, List[Dict[str, str]]])
 async def create_and_query(input_data: CombinedInput):
@@ -407,10 +526,29 @@ async def create_and_query(input_data: CombinedInput):
         print(f"File path: {input_data.file_path}")
         print(f"Query: {input_data.query}")
         
+        # Get database type
+        db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+        
+        # If using Nebula Graph, establish a connection once
+        nebula_connection = None
+        nebula_session = None
+        if db_type in ['nebula', 'both']:
+            try:
+                nebula_connection, nebula_session = get_nebula_connection()
+                print("Established Nebula Graph connection for create_and_query")
+            except Exception as e:
+                error_msg = f"Error establishing Nebula Graph connection: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+        
         # First create the knowledge graph
         try:
             print("Attempting to create knowledge graph...")
-            await create_knowledge_graph(FileInput(file_path=input_data.file_path, is_url=input_data.is_url))
+            # Create a FileInput object for the create_knowledge_graph function
+            file_input = FileInput(file_path=input_data.file_path, is_url=input_data.is_url)
+            
+            # Call the create_knowledge_graph function directly
+            await create_knowledge_graph(file_input)
             print("Successfully created knowledge graph")
         except Exception as e:
             print(f"Error during knowledge graph creation: {str(e)}")
@@ -443,6 +581,10 @@ async def create_and_query(input_data: CombinedInput):
     except Exception as e:
         print(f"Error in create_and_query: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+    finally:
+        # Close Nebula Graph connection if it was established
+        if db_type in ['nebula', 'both']:
+            close_nebula_connection()
 
 if __name__ == "__main__":
     import uvicorn

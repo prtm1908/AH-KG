@@ -269,53 +269,40 @@ def reinflect_relations(subgraph: List[Dict[str, str]], target_verbs: List[str])
     
     return reinflected_triplets
 
-def process_query_and_get_subgraph(query: str) -> List[Dict[str, str]]:
+def process_query_and_get_subgraph(query: str, session=None) -> List[Dict[str, str]]:
     """
-    Main function to process a query and get relevant subgraph.
+    Process a query to identify nouns and verbs, and retrieve a relevant subgraph.
     
     Args:
         query: Input query string
+        session: Optional Nebula Graph session to use. If None, a new connection will be established.
         
     Returns:
-        List of triplets representing the relevant subgraph with re-inflected relations
+        List of triplets representing the relevant subgraph
     """
-    # 1. Process query to identify nouns and verbs (including coreference resolution)
+    print("\nStarting process_query_and_get_subgraph")
+    
+    # Process the query to identify nouns and verbs
     nouns, verbs = process_query(query)
+    print(f"Identified nouns: {nouns}")
+    print(f"Identified verbs: {verbs}")
     
-    print(f"\nQuery analysis:")
-    print(f"Found nouns: {nouns}")
-    print(f"Found verbs: {verbs}")
+    # Get the database type from environment variables
+    load_dotenv(override=True)
+    db_type = os.getenv('DB_TYPE', 'neo4j').lower()
     
-    # 2. Lemmatize relations
-    relation_tracking = lemmatize_relations(verbs)
-    
-    # 3. Get all possible relation forms (original and lemmatized)
-    all_relations = []
-    for lemmatized, originals in relation_tracking.items():
-        all_relations.extend([lemmatized] + originals)
-    
-    print(f"All relations to search for: {all_relations}")
-    
-    # 4. Get subgraph from the specified database(s)
-    if not nouns and all_relations:
-        print("No nouns found but verbs found - will search for all nodes connected by these verbs")
-    elif nouns and not all_relations:
-        print("Nouns found but no verbs - will search for all relationships containing these nouns")
-    elif nouns and all_relations:
-        print("Both nouns and verbs found - will search for specific relationships between these nouns")
+    # Retrieve the subgraph based on the database type
+    if db_type == 'neo4j':
+        return get_subgraph_from_neo4j(nouns, verbs)
+    elif db_type == 'nebula':
+        return get_subgraph_from_nebula(nouns, verbs, session=session)
+    elif db_type == 'both':
+        # For 'both', we'll return the Neo4j results as they're more detailed
+        return get_subgraph_from_neo4j(nouns, verbs)
     else:
-        print("No nouns or verbs found - will return empty result")
-        return []
-    
-    subgraph = get_subgraph_from_database(nouns, all_relations)
-    print(f"Found {len(subgraph)} triplets in subgraph")
-    
-    # 5. Re-inflect relations to match original verbs from query
-    reinflected_subgraph = reinflect_relations(subgraph, verbs)
-    
-    return reinflected_subgraph
+        raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
-def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int = 2) -> List[Dict[str, str]]:
+def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int = 2, session=None) -> List[Dict[str, str]]:
     """
     Extract a subgraph from Nebula Graph based on given nodes and relations.
     
@@ -323,6 +310,7 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
         nodes: List of nodes to start from
         relations: List of relations to consider
         depth: Depth of traversal (default: 2)
+        session: Optional Nebula Graph session to use. If None, a new connection will be established.
         
     Returns:
         List of triplets representing the subgraph
@@ -345,30 +333,36 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
         print(f"Space: {'Present' if space else 'Missing'}")
         raise ValueError("Missing Nebula Graph credentials in .env file")
     
-    print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+    connection_pool = None
+    should_close_connection = False
     
     try:
-        # Create Nebula Graph connection pool
-        config = Config()
-        connection_pool = ConnectionPool()
-        
-        # Initialize the connection pool
-        init_result = connection_pool.init([(host, port)], config)
-        if not init_result:
-            raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
-        
-        # Get a session from the pool
-        session = connection_pool.get_session(user, password)
-        
-        # Use the space
-        resp = session.execute(f"USE {space}")
-        if not resp.is_succeeded():
-            raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
+        # If no session is provided, create a new connection
+        if session is None:
+            print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+            should_close_connection = True
+            
+            # Create Nebula Graph connection pool
+            config = Config()
+            connection_pool = ConnectionPool()
+            
+            # Initialize the connection pool
+            init_result = connection_pool.init([(host, port)], config)
+            if not init_result:
+                raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
+            
+            # Get a session from the pool
+            session = connection_pool.get_session(user, password)
+            
+            # Use the space
+            resp = session.execute(f"USE {space}")
+            if not resp.is_succeeded():
+                raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
         
         subgraph_triplets = []
         
         # Create nGQL query to get subgraph with original forms metadata
-        if relations:  # If we have verbs/relations to match
+        if relations:
             # First find all nodes connected by our verbs
             relations_str = ", ".join([f"'{rel}'" for rel in relations])
             verb_nodes_query = f"""
@@ -385,8 +379,9 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
             resp = session.execute(verb_nodes_query)
             if not resp.is_succeeded():
                 print(f"Error executing verb nodes query: {resp.error_msg()}")
-                session.release()
-                connection_pool.close()
+                if should_close_connection:
+                    session.release()
+                    connection_pool.close()
                 return []
             
             verb_connected_nodes = []
@@ -414,8 +409,9 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
             resp = session.execute(verb_triplets_query)
             if not resp.is_succeeded():
                 print(f"Error executing verb triplets query: {resp.error_msg()}")
-                session.release()
-                connection_pool.close()
+                if should_close_connection:
+                    session.release()
+                    connection_pool.close()
                 return []
             
             verb_triplets = []
@@ -446,8 +442,9 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
                 resp = session.execute(noun_query)
                 if not resp.is_succeeded():
                     print(f"Error executing noun query: {resp.error_msg()}")
-                    session.release()
-                    connection_pool.close()
+                    if should_close_connection:
+                        session.release()
+                        connection_pool.close()
                     return []
                 
                 noun_triplets = []
@@ -481,24 +478,28 @@ def get_subgraph_from_nebula(nodes: List[str], relations: List[str], depth: int 
             resp = session.execute(nGQL_query)
             if not resp.is_succeeded():
                 print(f"Error executing query: {resp.error_msg()}")
-                session.release()
-                connection_pool.close()
+                if should_close_connection:
+                    session.release()
+                    connection_pool.close()
                 return []
             
             subgraph_triplets = []
             for row in resp.rows():
                 subgraph_triplets.append(eval(row[0]))
         
-        # Release the session back to the pool
-        session.release()
-        
-        # Close the connection pool
-        connection_pool.close()
+        # Only close the connection if we created it
+        if should_close_connection:
+            session.release()
+            connection_pool.close()
         
         return subgraph_triplets
         
     except Exception as e:
         print(f"An error occurred: {str(e)}")
+        # Only close the connection if we created it
+        if should_close_connection and connection_pool is not None:
+            session.release()
+            connection_pool.close()
         return []
 
 def get_subgraph_from_database(nodes: List[str], relations: List[str], depth: int = 2) -> List[Dict[str, str]]:
