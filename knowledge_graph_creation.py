@@ -232,14 +232,15 @@ def sanitize_edge(name: str) -> str:
     name = re.sub(r'_+', '_', name).strip('_')
     return name if name else "REL_UNKNOWN"
 
-def upload_to_nebula(triplets: list, relation_tracking: dict, session=None) -> None:
+def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, connection_pool=None) -> None:
     """
     Upload triplets to Nebula Graph.
     
     Args:
         triplets: List of triplets to upload
         relation_tracking: Dictionary tracking relations and their original forms
-        session: Optional Nebula Graph session to use. If None, a new connection will be established.
+        session: Optional Nebula session to reuse (if None, a new session will be created)
+        connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -259,31 +260,27 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None) -> N
         print(f"Space: {'Present' if space else 'Missing'}")
         raise ValueError("Missing Nebula Graph credentials in .env file")
     
-    connection_pool = None
-    should_close_connection = False
+    # Create connection pool and session if not provided
+    should_close = False
+    if connection_pool is None:
+        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+        config = Config()
+        connection_pool = ConnectionPool()
+        
+        # Initialize the connection pool
+        init_result = connection_pool.init([(host, port)], config)
+        if not init_result:
+            raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
+        
+        # Get a session from the pool
+        session = connection_pool.get_session(user, password)
+        should_close = True
     
     try:
-        # If no session is provided, create a new connection
-        if session is None:
-            print(f"Attempting to connect to Nebula Graph at {host}:{port}")
-            should_close_connection = True
-            
-            # Create Nebula Graph connection pool
-            config = Config()
-            connection_pool = ConnectionPool()
-            
-            # Initialize the connection pool
-            init_result = connection_pool.init([(host, port)], config)
-            if not init_result:
-                raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
-            
-            # Get a session from the pool
-            session = connection_pool.get_session(user, password)
-            
-            # Use the space
-            resp = session.execute(f"USE {space}")
-            if not resp.is_succeeded():
-                raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
+        # Use the space
+        resp = session.execute(f"USE {space}")
+        if not resp.is_succeeded():
+            raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
         
         # --- Drop existing tags and edges ---
         resp = session.execute("SHOW TAGS")
@@ -489,16 +486,17 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None) -> N
         
         print("Successfully uploaded triplets to Nebula Graph.")
         
-        # Only close the connection if we created it AND it's not being reused
-        if should_close_connection and session is None:
+        # Only release and close if we created the session and connection pool
+        if should_close:
             session.release()
             connection_pool.close()
     
     except Exception as e:
         print(f"upload_to_nebula error: {str(e)}")
-        # Only close the connection if we created it AND it's not being reused
-        if should_close_connection and session is None and connection_pool is not None:
+        # Only release and close if we created the session and connection pool
+        if should_close and session is not None:
             session.release()
+        if should_close and connection_pool is not None:
             connection_pool.close()
         raise
 
