@@ -165,6 +165,7 @@ def clear_nebula_database():
         print(f"NEBULA_SPACE: {os.getenv('NEBULA_SPACE')}")
         print(f"DB_TYPE: {os.getenv('DB_TYPE')}")
 
+        # Get Nebula Graph credentials
         host = os.getenv('NEBULA_HOST')
         port = int(os.getenv('NEBULA_PORT', '9669'))
         user = os.getenv('NEBULA_USER')
@@ -180,21 +181,20 @@ def clear_nebula_database():
             print(f"Space: {'Present' if space else 'Missing'}")
             raise ValueError(error_msg)
 
-        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
-        from nebula3.gclient.net import ConnectionPool
-        from nebula3.Config import Config
-
-        config = Config()
-        connection_pool = ConnectionPool()
+        # Use the global connection if available, otherwise create a new one
+        global nebula_connection_pool, nebula_session
         
-        # Initialize the connection pool with better error handling
-        init_result = connection_pool.init([(host, port)], config)
-        if not init_result:
-            error_msg = f"Failed to initialize connection pool to Nebula Graph at {host}:{port}"
-            print(f"Error: {error_msg}")
-            raise ConnectionError(error_msg)
-
-        session = connection_pool.get_session(user, password)
+        # If we don't have a connection, get one
+        if nebula_connection_pool is None or nebula_session is None:
+            print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+            connection_pool, session = get_nebula_connection()
+            # Store the connection in the global variables
+            nebula_connection_pool = connection_pool
+            nebula_session = session
+        else:
+            print(f"Using existing Nebula Graph connection")
+            connection_pool = nebula_connection_pool
+            session = nebula_session
 
         try:
             # Check existing spaces
@@ -270,9 +270,12 @@ def clear_nebula_database():
 
             print(f"Successfully initialized/cleared space '{space}'")
 
-        finally:
-            session.release()
-            connection_pool.close()
+        except Exception as e:
+            # If we created a new connection and an error occurred, close it
+            if connection_pool != nebula_connection_pool:
+                session.release()
+                connection_pool.close()
+            raise e
 
     except Exception as e:
         error_msg = f"Error in clear_nebula_database: {str(e)}"
@@ -371,6 +374,12 @@ async def create_knowledge_graph(input_data: FileInput):
     Returns:
         Dictionary with success message and processing details
     """
+    # Define db_type at the beginning of the function to avoid UnboundLocalError
+    db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    
+    # Declare global variables
+    global nebula_connection_pool, nebula_session
+    
     try:
         print("Starting create_knowledge_graph function")
         # Clear the existing database first
@@ -398,43 +407,18 @@ async def create_knowledge_graph(input_data: FileInput):
         batches = process_text_in_batches(text)
         print(f"Created {len(batches)} batches")
         
-        # Initialize Nebula connection if needed
-        nebula_session = None
-        nebula_connection_pool = None
-        
         # Check if we need to connect to Nebula
-        db_type = os.getenv('DB_TYPE', 'neo4j').lower()
         if db_type in ['nebula', 'both']:
-            try:
-                # Load environment variables
-                load_dotenv(override=True)
-                
-                # Get Nebula Graph credentials
-                host = os.getenv('NEBULA_HOST')
-                port = int(os.getenv('NEBULA_PORT', '9669'))
-                user = os.getenv('NEBULA_USER')
-                password = os.getenv('NEBULA_PASSWORD')
-                
-                if not all([host, user, password]):
-                    print("Warning: Missing Nebula Graph credentials, will create new connections for each batch")
-                else:
-                    print(f"Establishing Nebula Graph connection at {host}:{port}")
-                    from nebula3.gclient.net import ConnectionPool
-                    from nebula3.Config import Config
-                    
-                    config = Config()
-                    nebula_connection_pool = ConnectionPool()
-                    
-                    # Initialize the connection pool
-                    init_result = nebula_connection_pool.init([(host, port)], config)
-                    if not init_result:
-                        print("Warning: Failed to initialize Nebula connection pool, will create new connections for each batch")
-                    else:
-                        # Get a session from the pool
-                        nebula_session = nebula_connection_pool.get_session(user, password)
-                        print("Successfully established Nebula Graph connection")
-            except Exception as e:
-                print(f"Warning: Error establishing Nebula connection: {str(e)}, will create new connections for each batch")
+            # Check if we already have a connection from clear_graph_database
+            if nebula_connection_pool is None or nebula_session is None:
+                try:
+                    print("Establishing Nebula Graph connection...")
+                    nebula_connection_pool, nebula_session = get_nebula_connection()
+                    print("Successfully established Nebula Graph connection")
+                except Exception as e:
+                    print(f"Warning: Error establishing Nebula connection: {str(e)}, will create new connections for each batch")
+            else:
+                print("Using existing Nebula Graph connection from clear_graph_database")
         
         # Process each batch
         for i, batch in enumerate(batches, 1):
@@ -482,9 +466,8 @@ async def create_knowledge_graph(input_data: FileInput):
         print(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
     finally:
-        # Close Nebula Graph connection if it was established
-        if db_type in ['nebula', 'both'] and nebula_connection is not None:
-            close_nebula_connection()
+        # We don't close the connection here anymore since we want to reuse it
+        pass
 
 @app.post("/get-subgraph", response_model=List[Dict[str, str]])
 async def get_subgraph(query_data: SubgraphQuery):
@@ -497,6 +480,9 @@ async def get_subgraph(query_data: SubgraphQuery):
     Returns:
         List of triplets representing the relevant subgraph
     """
+    # Declare global variables
+    global nebula_connection_pool, nebula_session
+    
     try:
         print(f"Processing subgraph query: {query_data.query}")
         
@@ -504,11 +490,15 @@ async def get_subgraph(query_data: SubgraphQuery):
         db_type = os.getenv('DB_TYPE', 'neo4j').lower()
         
         # If using Nebula Graph, establish a connection
-        nebula_session = None
         if db_type in ['nebula', 'both']:
             try:
-                _, nebula_session = get_nebula_connection()
-                print("Established Nebula Graph connection for subgraph query")
+                # If we don't have a connection, get one
+                if nebula_connection_pool is None or nebula_session is None:
+                    print("Establishing Nebula Graph connection for subgraph query...")
+                    nebula_connection_pool, nebula_session = get_nebula_connection()
+                    print("Successfully established Nebula Graph connection")
+                else:
+                    print("Using existing Nebula Graph connection")
             except Exception as e:
                 error_msg = f"Error establishing Nebula Graph connection: {str(e)}"
                 print(error_msg)
@@ -536,6 +526,9 @@ async def create_and_query(input_data: CombinedInput):
     Returns:
         Dictionary containing both the created knowledge graph and the retrieved subgraph
     """
+    # Declare global variables
+    global nebula_connection_pool, nebula_session
+    
     try:
         print("\nStarting create_and_query function")
         print(f"File path: {input_data.file_path}")
@@ -545,12 +538,15 @@ async def create_and_query(input_data: CombinedInput):
         db_type = os.getenv('DB_TYPE', 'neo4j').lower()
         
         # If using Nebula Graph, establish a connection once
-        nebula_connection = None
-        nebula_session = None
         if db_type in ['nebula', 'both']:
             try:
-                nebula_connection, nebula_session = get_nebula_connection()
-                print("Established Nebula Graph connection for create_and_query")
+                # If we don't have a connection, get one
+                if nebula_connection_pool is None or nebula_session is None:
+                    print("Establishing Nebula Graph connection for create_and_query...")
+                    nebula_connection_pool, nebula_session = get_nebula_connection()
+                    print("Successfully established Nebula Graph connection")
+                else:
+                    print("Using existing Nebula Graph connection")
             except Exception as e:
                 error_msg = f"Error establishing Nebula Graph connection: {str(e)}"
                 print(error_msg)
@@ -598,9 +594,8 @@ async def create_and_query(input_data: CombinedInput):
         print(f"Error in create_and_query: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
     finally:
-        # Close Nebula Graph connection if it was established
-        if db_type in ['nebula', 'both']:
-            close_nebula_connection()
+        # We don't close the connection here anymore since we want to reuse it
+        pass
 
 if __name__ == "__main__":
     import uvicorn

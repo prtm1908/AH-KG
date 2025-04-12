@@ -281,27 +281,6 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         resp = session.execute(f"USE {space}")
         if not resp.is_succeeded():
             raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
-        
-        # --- Drop existing tags and edges ---
-        resp = session.execute("SHOW TAGS")
-        if resp.is_succeeded():
-            tags = [extract_value(row.values[0]) for row in resp.rows()]
-            for tag in tags:
-                drop_query = f"DROP TAG IF EXISTS `{tag}`"
-                resp_drop = session.execute(drop_query)
-                if not resp_drop.is_succeeded():
-                    print(f"Warning: Failed to drop tag {tag}: {resp_drop.error_msg()}")
-    
-        resp = session.execute("SHOW EDGES")
-        if resp.is_succeeded():
-            edges = [extract_value(row.values[0]) for row in resp.rows()]
-            for edge in edges:
-                drop_query = f"DROP EDGE IF EXISTS `{edge}`"
-                resp_drop = session.execute(drop_query)
-                if not resp_drop.is_succeeded():
-                    print(f"Warning: Failed to drop edge {edge}: {resp_drop.error_msg()}")
-    
-        print(f"Successfully initialized/cleared space '{space}'")
     
         # --- Build expected schema ---
         vertex_labels = set()
@@ -315,35 +294,47 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         # Track created tags to avoid duplicates
         created_tags = set()
         
-        # Helper function to wait for a specific tag to be available
-        def wait_for_tag(tag_name, timeout=30):
+        # Helper function to retry an operation until it succeeds or timeout is reached
+        def retry_operation(operation_func, operation_name, max_timeout=100):
+            """
+            Retry an operation until it succeeds or timeout is reached.
+            
+            Args:
+                operation_func: Function that performs the operation and returns (success, result)
+                operation_name: Name of the operation for logging
+                max_timeout: Maximum time in seconds to retry
+                
+            Returns:
+                Tuple of (success, result)
+            """
             start_time = time.time()
-            while time.time() - start_time < timeout:
-                session.execute(f"USE `{space}`")
-                tag_resp = session.execute("SHOW TAGS")
-                if tag_resp.is_succeeded():
-                    current_tags = set(extract_value(row.values[0]) for row in tag_resp.rows())
-                    if tag_name in current_tags:
-                        print(f"Tag {tag_name} found, waiting additional 10 seconds for propagation...")
-                        time.sleep(10)  # Wait 10 seconds after tag is found
-                        return True
-                time.sleep(1)
-            return False
-        
-        # Helper function to wait for a specific edge to be available
-        def wait_for_edge(edge_name, timeout=30):
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                session.execute(f"USE `{space}`")
-                edge_resp = session.execute("SHOW EDGES")
-                if edge_resp.is_succeeded():
-                    current_edges = set(extract_value(row.values[0]) for row in edge_resp.rows())
-                    if edge_name in current_edges:
-                        print(f"Edge {edge_name} found, waiting additional 10 seconds for propagation...")
-                        time.sleep(10)  # Wait 10 seconds after edge is found
-                        return True
-                time.sleep(1)
-            return False
+            attempt = 1
+            
+            while time.time() - start_time < max_timeout:
+                print(f"Attempt {attempt} for {operation_name}...")
+                success, result = operation_func()
+                
+                if success:
+                    print(f"Successfully completed {operation_name} on attempt {attempt}")
+                    return True, result
+                
+                # If we get here, the operation failed
+                elapsed = time.time() - start_time
+                remaining = max_timeout - elapsed
+                
+                if remaining > 0:
+                    # Sleep briefly before retrying, but not too long
+                    sleep_time = min(1, remaining)
+                    print(f"Operation {operation_name} failed: {result}. Retrying in {sleep_time:.1f} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    print(f"Operation {operation_name} failed after {elapsed:.1f} seconds: {result}")
+                    return False, result
+                
+                attempt += 1
+            
+            print(f"Operation {operation_name} timed out after {max_timeout} seconds")
+            return False, f"Operation timed out after {max_timeout} seconds"
         
         # Process each triplet
         import hashlib
@@ -359,43 +350,94 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             
             # Create and wait for subject tag if not already created
             if sub_label not in created_tags:
-                query = f"CREATE TAG IF NOT EXISTS {sub_label} (name string, text string, caption string, displayName string, title string)"
-                result = session.execute(query)
-                if not result.is_succeeded():
-                    print(f"Failed to create tag {sub_label}: {result.error_msg()}")
+                # Define a mutable container for the sub_label
+                sub_label_container = {"value": sub_label}
+                
+                def create_subject_tag():
+                    # Use the container to access and modify the sub_label
+                    current_sub_label = sub_label_container["value"]
+                    query = f"CREATE TAG IF NOT EXISTS {current_sub_label} (name string, text string, caption string, displayName string, title string)"
+                    result = session.execute(query)
+                    
+                    if not result.is_succeeded():
+                        # Add prefix for any error, not just syntax errors
+                        print(f"Trying with VER_ prefix for tag {current_sub_label}...")
+                        new_sub_label = f"VER_{current_sub_label}"
+                        sub_label_container["value"] = new_sub_label
+                        query_with_prefix = f"CREATE TAG IF NOT EXISTS {new_sub_label} (name string, text string, caption string, displayName string, title string)"
+                        result_with_prefix = session.execute(query_with_prefix)
+                        if result_with_prefix.is_succeeded():
+                            return True, result_with_prefix
+                        return False, result_with_prefix.error_msg()
+                    
+                    return True, result
+                
+                success, result = retry_operation(create_subject_tag, f"creating subject tag {sub_label_container['value']}")
+                if success:
+                    created_tags.add(sub_label_container["value"])
+                    sub_label = sub_label_container["value"]  # Update the outer sub_label
                 else:
-                    print(f"Created tag {sub_label}, waiting for propagation...")
-                    if wait_for_tag(sub_label):
-                        print(f"Tag {sub_label} is available")
-                        created_tags.add(sub_label)
-                    else:
-                        print(f"Warning: Tag {sub_label} propagation timed out")
+                    print(f"Failed to create subject tag {sub_label_container['value']} after multiple attempts: {result}")
             
             # Create and wait for object tag if not already created
             if obj_label not in created_tags:
-                query = f"CREATE TAG IF NOT EXISTS {obj_label} (name string, text string, caption string, displayName string, title string)"
-                result = session.execute(query)
-                if not result.is_succeeded():
-                    print(f"Failed to create tag {obj_label}: {result.error_msg()}")
+                # Define a mutable container for the obj_label
+                obj_label_container = {"value": obj_label}
+                
+                def create_object_tag():
+                    # Use the container to access and modify the obj_label
+                    current_obj_label = obj_label_container["value"]
+                    query = f"CREATE TAG IF NOT EXISTS {current_obj_label} (name string, text string, caption string, displayName string, title string)"
+                    result = session.execute(query)
+                    
+                    if not result.is_succeeded():
+                        # Add prefix for any error, not just syntax errors
+                        print(f"Trying with VER_ prefix for tag {current_obj_label}...")
+                        new_obj_label = f"VER_{current_obj_label}"
+                        obj_label_container["value"] = new_obj_label
+                        query_with_prefix = f"CREATE TAG IF NOT EXISTS {new_obj_label} (name string, text string, caption string, displayName string, title string)"
+                        result_with_prefix = session.execute(query_with_prefix)
+                        if result_with_prefix.is_succeeded():
+                            return True, result_with_prefix
+                        return False, result_with_prefix.error_msg()
+                    
+                    return True, result
+                
+                success, result = retry_operation(create_object_tag, f"creating object tag {obj_label_container['value']}")
+                if success:
+                    created_tags.add(obj_label_container["value"])
+                    obj_label = obj_label_container["value"]  # Update the outer obj_label
                 else:
-                    print(f"Created tag {obj_label}, waiting for propagation...")
-                    if wait_for_tag(obj_label):
-                        print(f"Tag {obj_label} is available")
-                        created_tags.add(obj_label)
-                    else:
-                        print(f"Warning: Tag {obj_label} propagation timed out")
+                    print(f"Failed to create object tag {obj_label_container['value']} after multiple attempts: {result}")
             
             # Create and wait for edge type
-            query = f"CREATE EDGE IF NOT EXISTS {rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
-            result = session.execute(query)
-            if not result.is_succeeded():
-                print(f"Failed to create edge {rel_type}: {result.error_msg()}")
+            # Define a mutable container for the rel_type
+            rel_type_container = {"value": rel_type}
+            
+            def create_edge_type():
+                # Use the container to access and modify the rel_type
+                current_rel_type = rel_type_container["value"]
+                query = f"CREATE EDGE IF NOT EXISTS {current_rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
+                result = session.execute(query)
+                
+                if not result.is_succeeded():
+                    # Add prefix for any error, not just syntax errors
+                    print(f"Trying with REL_ prefix for edge {current_rel_type}...")
+                    new_rel_type = f"REL_{current_rel_type}"
+                    rel_type_container["value"] = new_rel_type
+                    query_with_prefix = f"CREATE EDGE IF NOT EXISTS {new_rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
+                    result_with_prefix = session.execute(query_with_prefix)
+                    if result_with_prefix.is_succeeded():
+                        return True, result_with_prefix
+                    return False, result_with_prefix.error_msg()
+                
+                return True, result
+            
+            success, result = retry_operation(create_edge_type, f"creating edge type {rel_type_container['value']}")
+            if success:
+                rel_type = rel_type_container["value"]  # Update the outer rel_type
             else:
-                print(f"Created edge {rel_type}, waiting for propagation...")
-                if wait_for_edge(rel_type):
-                    print(f"Edge {rel_type} is available")
-                else:
-                    print(f"Warning: Edge {rel_type} propagation timed out")
+                print(f"Failed to create edge type {rel_type_container['value']} after multiple attempts: {result}")
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
@@ -406,28 +448,40 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
             
             # Insert subject vertex
-            insert_subject = (
-                f'INSERT VERTEX {sub_label} (name, text, caption, displayName, title) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
-            )
-            resp = session.execute(insert_subject)
-            if not resp.is_succeeded():
-                print(f"Error inserting subject vertex:\n{insert_subject}\nReason: {resp.error_msg()}")
+            def insert_subject_vertex():
+                insert_subject = (
+                    f'INSERT VERTEX {sub_label} (name, text, caption, displayName, title) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
+                )
+                resp = session.execute(insert_subject)
+                return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+            
+            success, result = retry_operation(insert_subject_vertex, f"inserting subject vertex {sub_id}")
+            if not success:
+                print(f"Failed to insert subject vertex {sub_id} after multiple attempts: {result}")
             
             # Insert object vertex
-            insert_object = (
-                f'INSERT VERTEX {obj_label} (name, text, caption, displayName, title) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
-            )
-            resp = session.execute(insert_object)
-            if not resp.is_succeeded():
-                print(f"Error inserting object vertex:\n{insert_object}\nReason: {resp.error_msg()}")
+            def insert_object_vertex():
+                insert_object = (
+                    f'INSERT VERTEX {obj_label} (name, text, caption, displayName, title) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
+                )
+                resp = session.execute(insert_object)
+                return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+            
+            success, result = retry_operation(insert_object_vertex, f"inserting object vertex {obj_id}")
+            if not success:
+                print(f"Failed to insert object vertex {obj_id} after multiple attempts: {result}")
             
             # Insert edge
-            insert_edge = (
-                f'INSERT EDGE {rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
-            )
-            resp = session.execute(insert_edge)
-            if not resp.is_succeeded():
-                print(f"Error inserting edge:\n{insert_edge}\nReason: {resp.error_msg()}")
+            def insert_edge():
+                insert_edge = (
+                    f'INSERT EDGE {rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+                )
+                resp = session.execute(insert_edge)
+                return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+            
+            success, result = retry_operation(insert_edge, f"inserting edge from {sub_id} to {obj_id}")
+            if not success:
+                print(f"Failed to insert edge from {sub_id} to {obj_id} after multiple attempts: {result}")
         
         print("Successfully uploaded triplets to Nebula Graph.")
         
@@ -445,9 +499,15 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             connection_pool.close()
         raise
 
-def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
+def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]], session=None, connection_pool=None) -> None:
     """
     Upload triplets to the database(s) specified in the DB_TYPE environment variable.
+    
+    Args:
+        triplets: List of triplets to upload
+        relation_tracking: Dictionary tracking relations and their original forms
+        session: Optional Nebula session to reuse (if None, a new session will be created)
+        connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -459,10 +519,10 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
     if db_type == 'neo4j':
         upload_to_neo4j(triplets, relation_tracking)
     elif db_type == 'nebula':
-        upload_to_nebula(triplets, relation_tracking)
+        upload_to_nebula(triplets, relation_tracking, session, connection_pool)
     elif db_type == 'both':
         upload_to_neo4j(triplets, relation_tracking)
-        upload_to_nebula(triplets, relation_tracking)
+        upload_to_nebula(triplets, relation_tracking, session, connection_pool)
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
