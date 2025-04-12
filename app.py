@@ -324,6 +324,44 @@ async def create_knowledge_graph(input_data: FileInput):
         batches = process_text_in_batches(text)
         print(f"Created {len(batches)} batches")
         
+        # Initialize Nebula connection if needed
+        nebula_session = None
+        nebula_connection_pool = None
+        
+        # Check if we need to connect to Nebula
+        db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+        if db_type in ['nebula', 'both']:
+            try:
+                # Load environment variables
+                load_dotenv(override=True)
+                
+                # Get Nebula Graph credentials
+                host = os.getenv('NEBULA_HOST')
+                port = int(os.getenv('NEBULA_PORT', '9669'))
+                user = os.getenv('NEBULA_USER')
+                password = os.getenv('NEBULA_PASSWORD')
+                
+                if not all([host, user, password]):
+                    print("Warning: Missing Nebula Graph credentials, will create new connections for each batch")
+                else:
+                    print(f"Establishing Nebula Graph connection at {host}:{port}")
+                    from nebula3.gclient.net import ConnectionPool
+                    from nebula3.Config import Config
+                    
+                    config = Config()
+                    nebula_connection_pool = ConnectionPool()
+                    
+                    # Initialize the connection pool
+                    init_result = nebula_connection_pool.init([(host, port)], config)
+                    if not init_result:
+                        print("Warning: Failed to initialize Nebula connection pool, will create new connections for each batch")
+                    else:
+                        # Get a session from the pool
+                        nebula_session = nebula_connection_pool.get_session(user, password)
+                        print("Successfully established Nebula Graph connection")
+            except Exception as e:
+                print(f"Warning: Error establishing Nebula connection: {str(e)}, will create new connections for each batch")
+        
         # Process each batch
         for i, batch in enumerate(batches, 1):
             print(f"\nProcessing batch {i}/{len(batches)}")
@@ -350,12 +388,27 @@ async def create_knowledge_graph(input_data: FileInput):
             # Upload to the specified graph database(s)
             print("Uploading to graph database...")
             try:
-                upload_to_database(processed_triplets, relation_tracking)
+                upload_to_database(processed_triplets, relation_tracking, nebula_session, nebula_connection_pool)
                 print("Successfully uploaded to graph database")
             except Exception as e:
                 error_msg = f"Error uploading to database: {str(e)}"
                 print(error_msg)
                 raise HTTPException(status_code=500, detail=error_msg)
+        
+        # Close Nebula connection if it was established
+        if nebula_session is not None:
+            try:
+                nebula_session.release()
+                print("Released Nebula session")
+            except Exception as e:
+                print(f"Warning: Error releasing Nebula session: {str(e)}")
+        
+        if nebula_connection_pool is not None:
+            try:
+                nebula_connection_pool.close()
+                print("Closed Nebula connection pool")
+            except Exception as e:
+                print(f"Warning: Error closing Nebula connection pool: {str(e)}")
         
         print("Successfully completed all batches")
         return {
@@ -410,7 +463,12 @@ async def create_and_query(input_data: CombinedInput):
         # First create the knowledge graph
         try:
             print("Attempting to create knowledge graph...")
-            await create_knowledge_graph(FileInput(file_path=input_data.file_path, is_url=input_data.is_url))
+            # Create a FileInput object for the create_knowledge_graph function
+            file_input = FileInput(file_path=input_data.file_path, is_url=input_data.is_url)
+            
+            # Call the create_knowledge_graph function directly to reuse the same connection
+            # This avoids creating a new connection for each batch
+            await create_knowledge_graph(file_input)
             print("Successfully created knowledge graph")
         except Exception as e:
             print(f"Error during knowledge graph creation: {str(e)}")

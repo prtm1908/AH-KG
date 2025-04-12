@@ -232,13 +232,15 @@ def sanitize_edge(name: str) -> str:
     name = re.sub(r'_+', '_', name).strip('_')
     return name if name else "REL_UNKNOWN"
 
-def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
+def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, connection_pool=None) -> None:
     """
     Upload triplets to Nebula Graph.
     
     Args:
         triplets: List of triplets to upload
         relation_tracking: Dictionary tracking relations and their original forms
+        session: Optional Nebula session to reuse (if None, a new session will be created)
+        connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -258,10 +260,10 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
         print(f"Space: {'Present' if space else 'Missing'}")
         raise ValueError("Missing Nebula Graph credentials in .env file")
     
-    print(f"Attempting to connect to Nebula Graph at {host}:{port}")
-    
-    try:
-        # Create Nebula Graph connection pool
+    # Create connection pool and session if not provided
+    should_close = False
+    if connection_pool is None:
+        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
         config = Config()
         connection_pool = ConnectionPool()
         
@@ -272,7 +274,9 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
         
         # Get a session from the pool
         session = connection_pool.get_session(user, password)
-        
+        should_close = True
+    
+    try:
         # Use the space
         resp = session.execute(f"USE {space}")
         if not resp.is_succeeded():
@@ -481,16 +485,30 @@ def upload_to_nebula(triplets: list, relation_tracking: dict) -> None:
                 print(f"Error inserting edge:\n{insert_edge}\nReason: {resp.error_msg()}")
         
         print("Successfully uploaded triplets to Nebula Graph.")
-        session.release()
-        connection_pool.close()
+        
+        # Only release and close if we created the session and connection pool
+        if should_close:
+            session.release()
+            connection_pool.close()
     
     except Exception as e:
         print(f"upload_to_nebula error: {str(e)}")
+        # Only release and close if we created the session and connection pool
+        if should_close and session is not None:
+            session.release()
+        if should_close and connection_pool is not None:
+            connection_pool.close()
         raise
 
-def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]]) -> None:
+def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[str, List[Tuple[str, str]]], nebula_session=None, nebula_connection_pool=None) -> None:
     """
     Upload triplets to the database(s) specified in the DB_TYPE environment variable.
+    
+    Args:
+        triplets: List of triplets to upload
+        relation_tracking: Dictionary tracking relations and their original forms
+        nebula_session: Optional Nebula session to reuse
+        nebula_connection_pool: Optional Nebula connection pool to reuse
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -502,10 +520,10 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
     if db_type == 'neo4j':
         upload_to_neo4j(triplets, relation_tracking)
     elif db_type == 'nebula':
-        upload_to_nebula(triplets, relation_tracking)
+        upload_to_nebula(triplets, relation_tracking, nebula_session, nebula_connection_pool)
     elif db_type == 'both':
         upload_to_neo4j(triplets, relation_tracking)
-        upload_to_nebula(triplets, relation_tracking)
+        upload_to_nebula(triplets, relation_tracking, nebula_session, nebula_connection_pool)
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
 
