@@ -232,15 +232,17 @@ def sanitize_edge(name: str) -> str:
     name = re.sub(r'_+', '_', name).strip('_')
     return name if name else "REL_UNKNOWN"
 
-def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, connection_pool=None) -> None:
+def create_nebula_schema(session=None, connection_pool=None):
     """
-    Upload triplets to Nebula Graph.
+    Create the NOUN tag and VERB edge in Nebula Graph.
+    This function should be called once before processing any batches.
     
     Args:
-        triplets: List of triplets to upload
-        relation_tracking: Dictionary tracking relations and their original forms
         session: Optional Nebula session to reuse (if None, a new session will be created)
         connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
+        
+    Returns:
+        Tuple of (noun_tag, verb_edge) that were created
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -281,10 +283,6 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         resp = session.execute(f"USE {space}")
         if not resp.is_succeeded():
             raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
-    
-        # --- Create NOUN and VERB tags at the start ---
-        # Track created tags to avoid duplicates
-        created_tags = set()
         
         # Helper function to retry an operation until it succeeds or timeout is reached
         def retry_operation(operation_func, operation_name, max_timeout=100):
@@ -346,28 +344,30 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         
         success, result = retry_operation(create_noun_tag, "creating NOUN tag")
         if success:
-            created_tags.add("NOUN")
             noun_tag = "NOUN"
+            print("Waiting 30 seconds for NOUN tag to be fully propagated...")
+            time.sleep(30)
         else:
             print(f"Failed to create NOUN tag after multiple attempts: {result}")
             # Try with prefix
             success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string)"), "creating VER_NOUN tag")
             if success:
-                created_tags.add("VER_NOUN")
                 noun_tag = "VER_NOUN"
+                print("Waiting 30 seconds for VER_NOUN tag to be fully propagated...")
+                time.sleep(30)
             else:
                 print(f"Failed to create VER_NOUN tag after multiple attempts: {result}")
                 raise Exception("Failed to create NOUN tag")
         
-        # Create VERB tag
-        def create_verb_tag():
-            query = "CREATE TAG IF NOT EXISTS VERB (name string, text string, caption string, displayName string, title string)"
+        # Create VERB edge
+        def create_verb_edge():
+            query = "CREATE EDGE IF NOT EXISTS VERB (type string, name string, caption string, original_form string, pos_tag string, strength double)"
             result = session.execute(query)
             
             if not result.is_succeeded():
                 # Add prefix for any error, not just syntax errors
-                print(f"Trying with VER_ prefix for tag VERB...")
-                query_with_prefix = "CREATE TAG IF NOT EXISTS VER_VERB (name string, text string, caption string, displayName string, title string)"
+                print(f"Trying with REL_ prefix for edge VERB...")
+                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double)"
                 result_with_prefix = session.execute(query_with_prefix)
                 if result_with_prefix.is_succeeded():
                     return True, result_with_prefix
@@ -375,20 +375,137 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             
             return True, result
         
-        success, result = retry_operation(create_verb_tag, "creating VERB tag")
+        success, result = retry_operation(create_verb_edge, "creating VERB edge")
         if success:
-            created_tags.add("VERB")
-            verb_tag = "VERB"
+            verb_edge = "VERB"
+            print("Waiting 30 seconds for VERB edge to be fully propagated...")
+            time.sleep(30)
         else:
-            print(f"Failed to create VERB tag after multiple attempts: {result}")
+            print(f"Failed to create VERB edge after multiple attempts: {result}")
             # Try with prefix
-            success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_VERB (name string, text string, caption string, displayName string, title string)"), "creating VER_VERB tag")
+            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double)"), "creating REL_VERB edge")
             if success:
-                created_tags.add("VER_VERB")
-                verb_tag = "VER_VERB"
+                verb_edge = "REL_VERB"
+                print("Waiting 30 seconds for REL_VERB edge to be fully propagated...")
+                time.sleep(30)
             else:
-                print(f"Failed to create VER_VERB tag after multiple attempts: {result}")
-                raise Exception("Failed to create VERB tag")
+                print(f"Failed to create REL_VERB edge after multiple attempts: {result}")
+                raise Exception("Failed to create VERB edge")
+        
+        print("Successfully created Nebula Graph schema")
+        
+        # Only release and close if we created the session and connection pool
+        if should_close:
+            session.release()
+            connection_pool.close()
+        
+        return noun_tag, verb_edge
+    
+    except Exception as e:
+        print(f"create_nebula_schema error: {str(e)}")
+        # Only release and close if we created the session and connection pool
+        if should_close and session is not None:
+            session.release()
+        if should_close and connection_pool is not None:
+            connection_pool.close()
+        raise
+
+def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, connection_pool=None) -> None:
+    """
+    Upload triplets to Nebula Graph.
+    
+    Args:
+        triplets: List of triplets to upload
+        relation_tracking: Dictionary tracking relations and their original forms
+        session: Optional Nebula session to reuse (if None, a new session will be created)
+        connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
+    """
+    # Load environment variables with override=True to force reload
+    load_dotenv(override=True)
+    
+    # Get Nebula Graph credentials
+    host = os.getenv('NEBULA_HOST')
+    port = int(os.getenv('NEBULA_PORT', '9669'))
+    user = os.getenv('NEBULA_USER')
+    password = os.getenv('NEBULA_PASSWORD')
+    space = os.getenv('NEBULA_SPACE')
+    
+    if not all([host, user, password, space]):
+        print("Error: Missing Nebula Graph credentials in .env file")
+        print(f"Host: {'Present' if host else 'Missing'}")
+        print(f"User: {'Present' if user else 'Missing'}")
+        print(f"Password: {'Present' if password else 'Missing'}")
+        print(f"Space: {'Present' if space else 'Missing'}")
+        raise ValueError("Missing Nebula Graph credentials in .env file")
+    
+    # Create connection pool and session if not provided
+    should_close = False
+    if connection_pool is None:
+        print(f"Attempting to connect to Nebula Graph at {host}:{port}")
+        config = Config()
+        connection_pool = ConnectionPool()
+        
+        # Initialize the connection pool
+        init_result = connection_pool.init([(host, port)], config)
+        if not init_result:
+            raise ConnectionError(f"Failed to initialize connection pool to Nebula Graph at {host}:{port}")
+        
+        # Get a session from the pool
+        session = connection_pool.get_session(user, password)
+        should_close = True
+    
+    try:
+        # Use the space
+        resp = session.execute(f"USE {space}")
+        if not resp.is_succeeded():
+            raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
+    
+        # Use default tag and edge names
+        # These should have been created by create_nebula_schema before this function is called
+        noun_tag = "NOUN"
+        verb_edge = "VERB"
+        
+        # Helper function to retry an operation until it succeeds or timeout is reached
+        def retry_operation(operation_func, operation_name, max_timeout=100):
+            """
+            Retry an operation until it succeeds or timeout is reached.
+            
+            Args:
+                operation_func: Function that performs the operation and returns (success, result)
+                operation_name: Name of the operation for logging
+                max_timeout: Maximum time in seconds to retry
+                
+            Returns:
+                Tuple of (success, result)
+            """
+            start_time = time.time()
+            attempt = 1
+            
+            while time.time() - start_time < max_timeout:
+                print(f"Attempt {attempt} for {operation_name}...")
+                success, result = operation_func()
+                
+                if success:
+                    print(f"Successfully completed {operation_name} on attempt {attempt}")
+                    return True, result
+                
+                # If we get here, the operation failed
+                elapsed = time.time() - start_time
+                remaining = max_timeout - elapsed
+                
+                if remaining > 0:
+                    # Sleep briefly before retrying, but not too long
+                    sleep_time = min(1, remaining)
+                    print(f"Operation {operation_name} failed: {result}. Retrying in {sleep_time:.1f} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    print(f"Operation {operation_name} failed after {elapsed:.1f} seconds: {result}")
+                    return False, result
+                
+                attempt += 1
+            
+            print(f"Operation {operation_name} timed out after {max_timeout} seconds")
+            return False, f"Operation timed out after {max_timeout} seconds"
         
         # Process each triplet
         import hashlib
@@ -400,7 +517,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             # Sanitize names
             sub_label = noun_tag  # Use NOUN tag for all vertices
             obj_label = noun_tag  # Use NOUN tag for all vertices
-            rel_type = verb_tag  # Use VERB tag for all edges
+            rel_type = verb_edge  # Use VERB edge for all relationships
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])

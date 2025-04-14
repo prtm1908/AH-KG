@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, upload_to_nebula, upload_to_neo4j
+from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, upload_to_nebula, upload_to_neo4j, create_nebula_schema
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -419,6 +419,16 @@ async def create_knowledge_graph(input_data: FileInput):
                     print(f"Warning: Error establishing Nebula connection: {str(e)}, will create new connections for each batch")
             else:
                 print("Using existing Nebula Graph connection from clear_graph_database")
+            
+            # Create Nebula schema once before processing batches
+            try:
+                print("Creating Nebula Graph schema...")
+                create_nebula_schema(nebula_session, nebula_connection_pool)
+                print("Successfully created Nebula Graph schema")
+            except Exception as e:
+                error_msg = f"Error creating Nebula Graph schema: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
         
         # Process each batch
         for i, batch in enumerate(batches, 1):
@@ -545,6 +555,16 @@ async def create_and_query(input_data: CombinedInput):
                     print("Establishing Nebula Graph connection for create_and_query...")
                     nebula_connection_pool, nebula_session = get_nebula_connection()
                     print("Successfully established Nebula Graph connection")
+                
+                    # Create Nebula schema once before processing batches
+                    try:
+                        print("Creating Nebula Graph schema...")
+                        create_nebula_schema(nebula_session, nebula_connection_pool)
+                        print("Successfully created Nebula Graph schema")
+                    except Exception as e:
+                        error_msg = f"Error creating Nebula Graph schema: {str(e)}"
+                        print(error_msg)
+                        raise HTTPException(status_code=500, detail=error_msg)
                 else:
                     print("Using existing Nebula Graph connection")
             except Exception as e:
