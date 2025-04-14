@@ -282,15 +282,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         if not resp.is_succeeded():
             raise Exception(f"Failed to use space {space}: {resp.error_msg()}")
     
-        # --- Build expected schema ---
-        vertex_labels = set()
-        edge_types = set()
-        for triplet in triplets:
-            vertex_labels.add(sanitize_vertex(triplet['first_node']))
-            vertex_labels.add(sanitize_vertex(triplet['second_node']))
-            edge_types.add(sanitize_edge(triplet['relation']))
-    
-        # --- Create vertex tags and insert vertices ---
+        # --- Create NOUN and VERB tags at the start ---
         # Track created tags to avoid duplicates
         created_tags = set()
         
@@ -336,6 +328,68 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             print(f"Operation {operation_name} timed out after {max_timeout} seconds")
             return False, f"Operation timed out after {max_timeout} seconds"
         
+        # Create NOUN tag
+        def create_noun_tag():
+            query = "CREATE TAG IF NOT EXISTS NOUN (name string, text string, caption string, displayName string, title string)"
+            result = session.execute(query)
+            
+            if not result.is_succeeded():
+                # Add prefix for any error, not just syntax errors
+                print(f"Trying with VER_ prefix for tag NOUN...")
+                query_with_prefix = "CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string)"
+                result_with_prefix = session.execute(query_with_prefix)
+                if result_with_prefix.is_succeeded():
+                    return True, result_with_prefix
+                return False, result_with_prefix.error_msg()
+            
+            return True, result
+        
+        success, result = retry_operation(create_noun_tag, "creating NOUN tag")
+        if success:
+            created_tags.add("NOUN")
+            noun_tag = "NOUN"
+        else:
+            print(f"Failed to create NOUN tag after multiple attempts: {result}")
+            # Try with prefix
+            success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string)"), "creating VER_NOUN tag")
+            if success:
+                created_tags.add("VER_NOUN")
+                noun_tag = "VER_NOUN"
+            else:
+                print(f"Failed to create VER_NOUN tag after multiple attempts: {result}")
+                raise Exception("Failed to create NOUN tag")
+        
+        # Create VERB tag
+        def create_verb_tag():
+            query = "CREATE TAG IF NOT EXISTS VERB (name string, text string, caption string, displayName string, title string)"
+            result = session.execute(query)
+            
+            if not result.is_succeeded():
+                # Add prefix for any error, not just syntax errors
+                print(f"Trying with VER_ prefix for tag VERB...")
+                query_with_prefix = "CREATE TAG IF NOT EXISTS VER_VERB (name string, text string, caption string, displayName string, title string)"
+                result_with_prefix = session.execute(query_with_prefix)
+                if result_with_prefix.is_succeeded():
+                    return True, result_with_prefix
+                return False, result_with_prefix.error_msg()
+            
+            return True, result
+        
+        success, result = retry_operation(create_verb_tag, "creating VERB tag")
+        if success:
+            created_tags.add("VERB")
+            verb_tag = "VERB"
+        else:
+            print(f"Failed to create VERB tag after multiple attempts: {result}")
+            # Try with prefix
+            success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_VERB (name string, text string, caption string, displayName string, title string)"), "creating VER_VERB tag")
+            if success:
+                created_tags.add("VER_VERB")
+                verb_tag = "VER_VERB"
+            else:
+                print(f"Failed to create VER_VERB tag after multiple attempts: {result}")
+                raise Exception("Failed to create VERB tag")
+        
         # Process each triplet
         import hashlib
         for triplet in triplets:
@@ -344,100 +398,9 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             rel = triplet['relation']
             
             # Sanitize names
-            sub_label = sanitize_vertex(sub_name)
-            obj_label = sanitize_vertex(obj_name)
-            rel_type = sanitize_edge(rel)
-            
-            # Create and wait for subject tag if not already created
-            if sub_label not in created_tags:
-                # Define a mutable container for the sub_label
-                sub_label_container = {"value": sub_label}
-                
-                def create_subject_tag():
-                    # Use the container to access and modify the sub_label
-                    current_sub_label = sub_label_container["value"]
-                    query = f"CREATE TAG IF NOT EXISTS {current_sub_label} (name string, text string, caption string, displayName string, title string)"
-                    result = session.execute(query)
-                    
-                    if not result.is_succeeded():
-                        # Add prefix for any error, not just syntax errors
-                        print(f"Trying with VER_ prefix for tag {current_sub_label}...")
-                        new_sub_label = f"VER_{current_sub_label}"
-                        sub_label_container["value"] = new_sub_label
-                        query_with_prefix = f"CREATE TAG IF NOT EXISTS {new_sub_label} (name string, text string, caption string, displayName string, title string)"
-                        result_with_prefix = session.execute(query_with_prefix)
-                        if result_with_prefix.is_succeeded():
-                            return True, result_with_prefix
-                        return False, result_with_prefix.error_msg()
-                    
-                    return True, result
-                
-                success, result = retry_operation(create_subject_tag, f"creating subject tag {sub_label_container['value']}")
-                if success:
-                    created_tags.add(sub_label_container["value"])
-                    sub_label = sub_label_container["value"]  # Update the outer sub_label
-                else:
-                    print(f"Failed to create subject tag {sub_label_container['value']} after multiple attempts: {result}")
-            
-            # Create and wait for object tag if not already created
-            if obj_label not in created_tags:
-                # Define a mutable container for the obj_label
-                obj_label_container = {"value": obj_label}
-                
-                def create_object_tag():
-                    # Use the container to access and modify the obj_label
-                    current_obj_label = obj_label_container["value"]
-                    query = f"CREATE TAG IF NOT EXISTS {current_obj_label} (name string, text string, caption string, displayName string, title string)"
-                    result = session.execute(query)
-                    
-                    if not result.is_succeeded():
-                        # Add prefix for any error, not just syntax errors
-                        print(f"Trying with VER_ prefix for tag {current_obj_label}...")
-                        new_obj_label = f"VER_{current_obj_label}"
-                        obj_label_container["value"] = new_obj_label
-                        query_with_prefix = f"CREATE TAG IF NOT EXISTS {new_obj_label} (name string, text string, caption string, displayName string, title string)"
-                        result_with_prefix = session.execute(query_with_prefix)
-                        if result_with_prefix.is_succeeded():
-                            return True, result_with_prefix
-                        return False, result_with_prefix.error_msg()
-                    
-                    return True, result
-                
-                success, result = retry_operation(create_object_tag, f"creating object tag {obj_label_container['value']}")
-                if success:
-                    created_tags.add(obj_label_container["value"])
-                    obj_label = obj_label_container["value"]  # Update the outer obj_label
-                else:
-                    print(f"Failed to create object tag {obj_label_container['value']} after multiple attempts: {result}")
-            
-            # Create and wait for edge type
-            # Define a mutable container for the rel_type
-            rel_type_container = {"value": rel_type}
-            
-            def create_edge_type():
-                # Use the container to access and modify the rel_type
-                current_rel_type = rel_type_container["value"]
-                query = f"CREATE EDGE IF NOT EXISTS {current_rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
-                result = session.execute(query)
-                
-                if not result.is_succeeded():
-                    # Add prefix for any error, not just syntax errors
-                    print(f"Trying with REL_ prefix for edge {current_rel_type}...")
-                    new_rel_type = f"REL_{current_rel_type}"
-                    rel_type_container["value"] = new_rel_type
-                    query_with_prefix = f"CREATE EDGE IF NOT EXISTS {new_rel_type} (type string, name string, caption string, original_form string, pos_tag string, strength double)"
-                    result_with_prefix = session.execute(query_with_prefix)
-                    if result_with_prefix.is_succeeded():
-                        return True, result_with_prefix
-                    return False, result_with_prefix.error_msg()
-                
-                return True, result
-            
-            success, result = retry_operation(create_edge_type, f"creating edge type {rel_type_container['value']}")
-            if success:
-                rel_type = rel_type_container["value"]  # Update the outer rel_type
-            else:
-                print(f"Failed to create edge type {rel_type_container['value']} after multiple attempts: {result}")
+            sub_label = noun_tag  # Use NOUN tag for all vertices
+            obj_label = noun_tag  # Use NOUN tag for all vertices
+            rel_type = verb_tag  # Use VERB tag for all edges
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
@@ -458,6 +421,18 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             success, result = retry_operation(insert_subject_vertex, f"inserting subject vertex {sub_id}")
             if not success:
                 print(f"Failed to insert subject vertex {sub_id} after multiple attempts: {result}")
+                # Try with VER_ prefix for the tag
+                print(f"Trying with VER_ prefix for subject vertex {sub_id}...")
+                def insert_subject_vertex_with_prefix():
+                    insert_subject = (
+                        f'INSERT VERTEX VER_{sub_label} (name, text, caption, displayName, title) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}")'
+                    )
+                    resp = session.execute(insert_subject)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(insert_subject_vertex_with_prefix, f"inserting subject vertex {sub_id} with VER_ prefix")
+                if not success:
+                    print(f"Failed to insert subject vertex {sub_id} with VER_ prefix after multiple attempts: {result}")
             
             # Insert object vertex
             def insert_object_vertex():
@@ -470,6 +445,18 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             success, result = retry_operation(insert_object_vertex, f"inserting object vertex {obj_id}")
             if not success:
                 print(f"Failed to insert object vertex {obj_id} after multiple attempts: {result}")
+                # Try with VER_ prefix for the tag
+                print(f"Trying with VER_ prefix for object vertex {obj_id}...")
+                def insert_object_vertex_with_prefix():
+                    insert_object = (
+                        f'INSERT VERTEX VER_{obj_label} (name, text, caption, displayName, title) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}")'
+                    )
+                    resp = session.execute(insert_object)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(insert_object_vertex_with_prefix, f"inserting object vertex {obj_id} with VER_ prefix")
+                if not success:
+                    print(f"Failed to insert object vertex {obj_id} with VER_ prefix after multiple attempts: {result}")
             
             # Insert edge
             def insert_edge():
@@ -482,6 +469,18 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             success, result = retry_operation(insert_edge, f"inserting edge from {sub_id} to {obj_id}")
             if not success:
                 print(f"Failed to insert edge from {sub_id} to {obj_id} after multiple attempts: {result}")
+                # Try with REL_ prefix for the edge
+                print(f"Trying with REL_ prefix for edge from {sub_id} to {obj_id}...")
+                def insert_edge_with_prefix():
+                    insert_edge = (
+                        f'INSERT EDGE REL_{rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+                    )
+                    resp = session.execute(insert_edge)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(insert_edge_with_prefix, f"inserting edge from {sub_id} to {obj_id} with REL_ prefix")
+                if not success:
+                    print(f"Failed to insert edge from {sub_id} to {obj_id} with REL_ prefix after multiple attempts: {result}")
         
         print("Successfully uploaded triplets to Nebula Graph.")
         
