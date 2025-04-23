@@ -302,7 +302,7 @@ def sanitize_edge(name: str) -> str:
 
 def create_nebula_schema(session=None, connection_pool=None):
     """
-    Create the NOUN tag and VERB edge in Nebula Graph.
+    Create the NOUN tag and VERB/ADJECTIVE edges in Nebula Graph.
     This function should be called once before processing any batches.
     
     Args:
@@ -310,7 +310,7 @@ def create_nebula_schema(session=None, connection_pool=None):
         connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
         
     Returns:
-        Tuple of (noun_tag, verb_edge) that were created
+        Tuple of (noun_tag, verb_edge, adjective_edge) that were created
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -460,6 +460,39 @@ def create_nebula_schema(session=None, connection_pool=None):
                 print(f"Failed to create REL_VERB edge after multiple attempts: {result}")
                 raise Exception("Failed to create VERB edge")
         
+        # Create ADJECTIVE edge
+        def create_adjective_edge():
+            query = "CREATE EDGE IF NOT EXISTS ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double)"
+            result = session.execute(query)
+            
+            if not result.is_succeeded():
+                # Add prefix for any error, not just syntax errors
+                print(f"Trying with REL_ prefix for edge ADJECTIVE...")
+                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double)"
+                result_with_prefix = session.execute(query_with_prefix)
+                if result_with_prefix.is_succeeded():
+                    return True, result_with_prefix
+                return False, result_with_prefix.error_msg()
+            
+            return True, result
+        
+        success, result = retry_operation(create_adjective_edge, "creating ADJECTIVE edge")
+        if success:
+            adjective_edge = "ADJECTIVE"
+            print("Waiting 30 seconds for ADJECTIVE edge to be fully propagated...")
+            time.sleep(30)
+        else:
+            print(f"Failed to create ADJECTIVE edge after multiple attempts: {result}")
+            # Try with prefix
+            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double)"), "creating REL_ADJECTIVE edge")
+            if success:
+                adjective_edge = "REL_ADJECTIVE"
+                print("Waiting 30 seconds for REL_ADJECTIVE edge to be fully propagated...")
+                time.sleep(30)
+            else:
+                print(f"Failed to create REL_ADJECTIVE edge after multiple attempts: {result}")
+                raise Exception("Failed to create ADJECTIVE edge")
+        
         print("Successfully created Nebula Graph schema")
         
         # Only release and close if we created the session and connection pool
@@ -467,7 +500,7 @@ def create_nebula_schema(session=None, connection_pool=None):
             session.release()
             connection_pool.close()
         
-        return noun_tag, verb_edge
+        return noun_tag, verb_edge, adjective_edge
     
     except Exception as e:
         print(f"create_nebula_schema error: {str(e)}")
@@ -532,6 +565,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         # These should have been created by create_nebula_schema before this function is called
         noun_tag = "NOUN"
         verb_edge = "VERB"
+        adjective_edge = "ADJECTIVE"
         
         # Helper function to retry an operation until it succeeds or timeout is reached
         def retry_operation(operation_func, operation_name, max_timeout=100):
@@ -581,16 +615,22 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             sub_name = triplet['first_node']
             obj_name = triplet['second_node']
             rel = triplet['relation']
+            rel_type = triplet.get('relation_type', 'VERB')  # Default to VERB if not specified
             
             # Sanitize names
             sub_label = noun_tag  # Use NOUN tag for all vertices
             obj_label = noun_tag  # Use NOUN tag for all vertices
-            rel_type = verb_edge  # Use VERB edge for all relationships
+            
+            # Determine which edge type to use based on the relation_type
+            if rel_type == 'ADJECTIVE':
+                edge_type = adjective_edge
+            else:
+                edge_type = verb_edge
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
             original_form = original_forms[0][0] if original_forms else rel
-            pos_tag = original_forms[0][1] if original_forms else 'VERB'
+            pos_tag = original_forms[0][1] if original_forms else rel_type
             
             sub_id = f"v_{int(hashlib.sha256(sub_name.encode()).hexdigest()[:8], 16) % 1000000}"
             obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
@@ -646,7 +686,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             # Insert edge
             def insert_edge():
                 insert_edge = (
-                    f'INSERT EDGE {rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+                    f'INSERT EDGE {edge_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
                 )
                 resp = session.execute(insert_edge)
                 return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -658,7 +698,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 print(f"Trying with REL_ prefix for edge from {sub_id} to {obj_id}...")
                 def insert_edge_with_prefix():
                     insert_edge = (
-                        f'INSERT EDGE REL_{rel_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
+                        f'INSERT EDGE REL_{edge_type} (type, name, caption, original_form, pos_tag, strength) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0)'
                     )
                     resp = session.execute(insert_edge)
                     return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -703,9 +743,15 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
     if db_type == 'neo4j':
         upload_to_neo4j(triplets, relation_tracking)
     elif db_type == 'nebula':
+        # Create schema first if needed
+        if session is None or connection_pool is None:
+            create_nebula_schema()
         upload_to_nebula(triplets, relation_tracking, session, connection_pool)
     elif db_type == 'both':
         upload_to_neo4j(triplets, relation_tracking)
+        # Create schema first if needed
+        if session is None or connection_pool is None:
+            create_nebula_schema()
         upload_to_nebula(triplets, relation_tracking, session, connection_pool)
     else:
         raise ValueError(f"Invalid DB_TYPE: {db_type}. Must be 'neo4j', 'nebula', or 'both'.")
