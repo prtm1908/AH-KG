@@ -12,6 +12,15 @@ services:
   #   networks:
   #     - nebula-net
 
+  stanford-corenlp:
+    image: nlpbox/corenlp:latest
+    platform: linux/amd64
+    ports:
+      - "9000:9000"
+    networks:
+      - nebula-net
+    restart: on-failure
+
   metad0:
     image: vesoft/nebula-metad:v3.0.0
     platform: linux/amd64

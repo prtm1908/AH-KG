@@ -12,9 +12,20 @@ from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
 import hashlib
 import time
+import json
+import requests
 
-def create_triplets_spacy_fastcoref(text):
-    print("\nStarting create_triplets_spacy_fastcoref")
+def create_resolved_text_spacy_fastcoref(text):
+    """
+    Process text with spaCy and FastCoref to resolve coreferences.
+    
+    Args:
+        text: Input text to process
+        
+    Returns:
+        Resolved text with coreferences resolved
+    """
+    print("\nStarting create_resolved_text_spacy_fastcoref")
     # Load English language model with minimal components
     print("Loading spaCy model...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "lemmatizer", "ner", "textcat"])
@@ -73,39 +84,96 @@ def create_triplets_spacy_fastcoref(text):
     print("Getting resolved text...")
     resolved_text = doc._.resolved_text
     
-    # Process the resolved text
-    print("Processing resolved text...")
-    doc = nlp(resolved_text)
+    print("Successfully created resolved text")
+    return resolved_text
+
+def create_triplets_stanford_corenlp(text):
+    """
+    Process text with Stanford CoreNLP to extract triplets.
     
-    triplets = []
-    processed_nouns = set()  # To avoid duplicate triplets
-    
-    # Process each sentence
-    print("Processing sentences to create triplets...")
-    for sent in doc.sents:
-        # Get all nouns and verbs in the sentence
-        nouns = [token for token in sent if token.pos_ == "NOUN"]
-        verbs = [token for token in sent if token.pos_ == "VERB"]
+    Args:
+        text: Input text to process
         
-        # If we have at least 2 nouns and 1 verb, create triplets
-        if len(nouns) >= 2 and len(verbs) >= 1:
-            # Create triplets for each consecutive pair of nouns
-            for i in range(len(nouns) - 1):
-                verb = verbs[min(i, len(verbs) - 1)]
-                if nouns[i].text == nouns[i + 1].text:
-                    continue
-                triplet_key = f"{nouns[i].text}_{verb.text}_{nouns[i + 1].text}"
-                if triplet_key not in processed_nouns:
-                    triplet = {
-                        'first_node': nouns[i].text,
-                        'relation': verb.text,
-                        'second_node': nouns[i + 1].text
-                    }
-                    triplets.append(triplet)
-                    processed_nouns.add(triplet_key)
+    Returns:
+        List of triplets extracted from the text
+    """
+    print("\nStarting create_triplets_stanford_corenlp")
+    print("Sending text to Stanford CoreNLP...")
     
-    print(f"Created {len(triplets)} triplets")
-    return triplets
+    # Stanford CoreNLP server URL
+    corenlp_url = "http://localhost:9000"
+    
+    # Prepare the request
+    properties = {
+        "annotators": "tokenize,ssplit,pos,lemma",
+        "outputFormat": "json"
+    }
+    
+    # Send the request to Stanford CoreNLP
+    try:
+        response = requests.post(
+            f"{corenlp_url}/?properties={json.dumps(properties)}",
+            data=text.encode('utf-8'),
+            headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+        )
+        
+        if response.status_code != 200:
+            print(f"Error from Stanford CoreNLP: {response.status_code}")
+            print(f"Response: {response.text}")
+            return []
+            
+        # Parse the response
+        result = response.json()
+        
+        triplets = []
+        processed_nouns = set()  # To avoid duplicate triplets
+        
+        # Process each sentence
+        for sentence in result.get('sentences', []):
+            tokens = sentence.get('tokens', [])
+            
+            # Extract nouns and verbs
+            nouns = []
+            verbs = []
+            
+            for token in tokens:
+                pos = token.get('pos', '')
+                word = token.get('word', '')
+                
+                # Stanford CoreNLP POS tags:
+                # NN, NNS, NNP, NNPS for nouns
+                # VB, VBD, VBG, VBN, VBP, VBZ for verbs
+                if pos.startswith('NN'):
+                    nouns.append((word, token.get('index', 0)))
+                elif pos.startswith('VB'):
+                    verbs.append((word, token.get('index', 0)))
+            
+            # If we have at least 2 nouns and 1 verb, create triplets
+            if len(nouns) >= 2 and len(verbs) >= 1:
+                # Create triplets for each consecutive pair of nouns
+                for i in range(len(nouns) - 1):
+                    # Find the closest verb to the first noun
+                    closest_verb = min(verbs, key=lambda v: abs(v[1] - nouns[i][1]))
+                    
+                    if nouns[i][0] == nouns[i + 1][0]:
+                        continue
+                        
+                    triplet_key = f"{nouns[i][0]}_{closest_verb[0]}_{nouns[i + 1][0]}"
+                    if triplet_key not in processed_nouns:
+                        triplet = {
+                            'first_node': nouns[i][0],
+                            'relation': closest_verb[0],
+                            'second_node': nouns[i + 1][0]
+                        }
+                        triplets.append(triplet)
+                        processed_nouns.add(triplet_key)
+        
+        print(f"Created {len(triplets)} triplets")
+        return triplets
+        
+    except Exception as e:
+        print(f"Error processing with Stanford CoreNLP: {str(e)}")
+        return []
 
 def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], Dict[str, List[Tuple[str, str]]]]:
     print("\nStarting process_triplets_with_lemmatization")
@@ -646,8 +714,18 @@ def upload_to_database(triplets: List[Dict[str, str]], relation_tracking: Dict[s
 if __name__ == "__main__":
     sample_text = ("John loves playing football. He also enjoys basketball. "
                    "Mary reads books in the library. She often studies there.")
-    triplets = create_triplets_spacy_fastcoref(sample_text)
+    
+    # Step 1: Resolve coreferences with spaCy and FastCoref
+    resolved_text = create_resolved_text_spacy_fastcoref(sample_text)
+    print("Resolved text:", resolved_text)
+    
+    # Step 2: Create triplets with Stanford CoreNLP
+    triplets = create_triplets_stanford_corenlp(resolved_text)
     print("Original triplets:", triplets)
+    
+    # Step 3: Process triplets with lemmatization
     processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
     print("\nProcessed triplets:", processed_triplets)
+    
+    # Step 4: Upload to database
     upload_to_database(processed_triplets, relation_tracking)

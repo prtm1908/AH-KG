@@ -1,7 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Optional
-from knowledge_graph_creation import create_triplets_spacy_fastcoref, process_triplets_with_lemmatization, upload_to_database, upload_to_nebula, upload_to_neo4j, create_nebula_schema
+from knowledge_graph_creation import (
+    create_resolved_text_spacy_fastcoref, 
+    create_triplets_stanford_corenlp, 
+    process_triplets_with_lemmatization, 
+    upload_to_database, 
+    upload_to_nebula, 
+    upload_to_neo4j, 
+    create_nebula_schema
+)
 from subgraph_retrieval import process_query_and_get_subgraph
 import re
 import os
@@ -433,17 +441,28 @@ async def create_knowledge_graph(input_data: FileInput):
         # Process each batch
         for i, batch in enumerate(batches, 1):
             print(f"\nProcessing batch {i}/{len(batches)}")
-            # Create triplets from batch
-            print("Creating triplets...")
+            
+            # Step 1: Resolve coreferences with spaCy and FastCoref
+            print("Resolving coreferences with spaCy and FastCoref...")
             try:
-                triplets = create_triplets_spacy_fastcoref(batch)
+                resolved_text = create_resolved_text_spacy_fastcoref(batch)
+                print(f"Successfully resolved coreferences, text length: {len(resolved_text)} characters")
+            except Exception as e:
+                error_msg = f"Error resolving coreferences: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+            
+            # Step 2: Create triplets with Stanford CoreNLP
+            print("Creating triplets with Stanford CoreNLP...")
+            try:
+                triplets = create_triplets_stanford_corenlp(resolved_text)
                 print(f"Created {len(triplets)} triplets")
             except Exception as e:
                 error_msg = f"Error creating triplets: {str(e)}"
                 print(error_msg)
                 raise HTTPException(status_code=500, detail=error_msg)
             
-            # Process triplets with lemmatization
+            # Step 3: Process triplets with lemmatization
             print("Processing triplets with lemmatization...")
             try:
                 processed_triplets, relation_tracking = process_triplets_with_lemmatization(triplets)
@@ -453,7 +472,7 @@ async def create_knowledge_graph(input_data: FileInput):
                 print(error_msg)
                 raise HTTPException(status_code=500, detail=error_msg)
             
-            # Upload to the specified graph database(s)
+            # Step 4: Upload to the specified graph database(s)
             print("Uploading to graph database...")
             try:
                 upload_to_database(processed_triplets, relation_tracking, nebula_session, nebula_connection_pool)

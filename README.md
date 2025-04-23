@@ -1,95 +1,97 @@
-# Knowledge Graph API
+# Knowledge Graph Creation with spaCy, FastCoref, and Stanford CoreNLP
 
-A FastAPI-based service that creates knowledge graphs from text and allows querying them. The service uses spaCy for NLP processing, FastCoref for coreference resolution, and supports both Neo4j and Nebula Graph for storage.
+This project creates knowledge graphs from text using a combination of:
+- spaCy with FastCoref for coreference resolution
+- Stanford CoreNLP for part-of-speech tagging and extracting nouns and verbs
+- Neo4j or Nebula Graph for graph storage
 
 ## Setup
 
-1. Set up environment variables in a `.env` file:
-```
-# Database Type (required)
-DB_TYPE=neo4j  # Options: 'neo4j', 'nebula', or 'both'
+1. Clone this repository
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. Download spaCy model:
+   ```
+   python -m spacy download en_core_web_sm
+   ```
+4. Create a `.env` file with your database credentials:
+   ```
+   # For Neo4j
+   NEO4J_URI=bolt://localhost:7687
+   NEO4J_USER=neo4j
+   NEO4J_PASSWORD=password
+   
+   # For Nebula Graph
+   NEBULA_HOST=localhost
+   NEBULA_PORT=9669
+   NEBULA_USER=root
+   NEBULA_PASSWORD=nebula
+   NEBULA_SPACE=knowledge_graph
+   
+   # Database type (neo4j, nebula, or both)
+   DB_TYPE=neo4j
+   ```
 
-# Neo4j Configuration (required if DB_TYPE is 'neo4j' or 'both')
-NEO4J_URI=your_neo4j_uri
-NEO4J_USER=your_neo4j_username
-NEO4J_PASSWORD=your_neo4j_password
+## Running with Docker
 
-# Nebula Graph Configuration (required if DB_TYPE is 'nebula' or 'both')
-NEBULA_HOST=your_nebula_host
-NEBULA_PORT=9669  # Default port, can be changed
-NEBULA_USER=your_nebula_username
-NEBULA_PASSWORD=your_nebula_password
-NEBULA_SPACE=your_nebula_space
+1. Start the services:
+   ```
+   docker-compose up -d
+   ```
+2. Wait for all services to start (especially Stanford CoreNLP)
+3. Test the Stanford CoreNLP connection:
+   ```
+   python test_stanford_corenlp.py
+   ```
+4. Run the knowledge graph creation:
+   ```
+   python knowledge_graph_creation.py
+   ```
 
-# Nebula Graph Service Configuration (optional)
-NEBULA_META_SERVER_ADDRS=metad0:9559,metad1:9559,metad2:9559  # Meta server addresses
-NEBULA_LOCAL_IP=graphd  # Local IP for graphd service
-NEBULA_WS_IP=graphd  # WebSocket IP for graphd service
-NEBULA_PORT=9669  # Graphd service port
-NEBULA_WS_HTTP_PORT=19669  # WebSocket HTTP port
-NEBULA_LOG_DIR=/logs  # Log directory
-```
+## How It Works
 
-2. Build and start the services:
-```bash
-# Build the services first
-docker compose build
+The knowledge graph creation process is divided into sequential steps:
 
-# Then start them
-docker compose up
-```
+1. **Coreference Resolution**: The text is first processed with spaCy and FastCoref to resolve pronouns and other references.
+2. **POS Tagging and Entity Extraction**: The resolved text is then sent to Stanford CoreNLP for part-of-speech tagging and extracting nouns and verbs.
+3. **Triplet Creation**: Triplets are created from the extracted nouns and verbs.
+4. **Lemmatization**: The triplets are processed to lemmatize the relations.
+5. **Graph Storage**: The triplets are uploaded to Neo4j, Nebula Graph, or both.
 
-The API will be available at `http://localhost:8000`
+This sequential approach allows for better control and debugging of each step in the process.
 
 ## API Endpoints
 
-### 1. Create Knowledge Graph
-- **Endpoint**: `POST /create-knowledge-graph`
-- **Input**: JSON with `file_path` pointing to your text file or URL, and `is_url` flag
-- **Description**: Creates a knowledge graph from the input text file or URL and stores it in Neo4j
-- **Example Request**:
-```json
-{
-    "file_path": "path/to/your/text/file.txt",
-    "is_url": false
-}
-```
-- **Example Request with URL**:
-```json
-{
-    "file_path": "https://www.gutenberg.org/cache/epub/1228/pg1228.txt",
-    "is_url": true
-}
-```
+The API provides the following endpoints:
 
-### 2. Get Subgraph
-- **Endpoint**: `POST /get-subgraph`
-- **Input**: JSON with `query` string
-- **Description**: Retrieves a relevant subgraph from the existing knowledge graph based on the query
-- **Example Request**:
-```json
-{
-    "query": "your query here"
-}
-```
+1. **Create Knowledge Graph** (`POST /create-knowledge-graph`):
+   - Creates a knowledge graph from a text file or URL
+   - Processes the text in batches
+   - For each batch:
+     - Resolves coreferences with spaCy and FastCoref
+     - Creates triplets with Stanford CoreNLP
+     - Processes triplets with lemmatization
+     - Uploads to the specified database(s)
 
-### 3. Create and Query
-- **Endpoint**: `POST /create-and-query`
-- **Input**: JSON with `file_path` and `query`, and optional `is_url` flag
-- **Description**: Creates a knowledge graph from the input text file or URL and immediately queries it
-- **Example Request**:
-```json
-{
-    "file_path": "path/to/your/text/file.txt",
-    "is_url": false,
-    "query": "your query here"
-}
-```
-- **Example Request with URL**:
-```json
-{
-    "file_path": "https://www.gutenberg.org/cache/epub/1228/pg1228.txt",
-    "is_url": true,
-    "query": "What is natural selection?"
-}
-```
+2. **Get Subgraph** (`POST /get-subgraph`):
+   - Retrieves a relevant subgraph from the existing knowledge graph based on a query
+
+3. **Create and Query** (`POST /create-and-query`):
+   - Creates a knowledge graph and immediately queries it
+
+## Customization
+
+- To use only Neo4j, set `DB_TYPE=neo4j` in your `.env` file.
+- To use only Nebula Graph, set `DB_TYPE=nebula` in your `.env` file.
+- To use both, set `DB_TYPE=both` in your `.env` file.
+
+## Troubleshooting
+
+- If Stanford CoreNLP is not responding, make sure it's running and accessible at `http://localhost:9000`.
+- If you're having issues with the database connection, check your credentials in the `.env` file.
+- For Nebula Graph, make sure to create the space before running the script:
+  ```
+  docker exec -it console nebula-console -addr graphd -port 9669 -u root -p nebula -e 'CREATE SPACE IF NOT EXISTS knowledge_graph(vid_type=FIXED_STRING(128), partition_num=10, replica_factor=3);'
+  ```
