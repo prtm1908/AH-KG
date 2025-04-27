@@ -400,6 +400,17 @@ async def create_knowledge_graph(input_data: FileInput):
             print(error_msg)
             raise HTTPException(status_code=500, detail=error_msg)
         
+        # Create Nebula schema if using Nebula
+        if db_type in ['nebula', 'both']:
+            try:
+                print("Creating Nebula Graph schema...")
+                create_nebula_schema(nebula_session, nebula_connection_pool)
+                print("Successfully created Nebula Graph schema")
+            except Exception as e:
+                error_msg = f"Error creating Nebula Graph schema: {str(e)}"
+                print(error_msg)
+                raise HTTPException(status_code=500, detail=error_msg)
+        
         # Read text from file
         print(f"Reading text from {'URL' if input_data.is_url else 'file'}: {input_data.file_path}")
         try:
