@@ -67,19 +67,60 @@ This sequential approach allows for better control and debugging of each step in
 The API provides the following endpoints:
 
 1. **Create Knowledge Graph** (`POST /create-knowledge-graph`):
-   - Creates a knowledge graph from a text file or URL
-   - Processes the text in batches
-   - For each batch:
-     - Resolves coreferences with spaCy and FastCoref
-     - Creates triplets with Stanford CoreNLP
-     - Processes triplets with lemmatization
-     - Uploads to the specified database(s)
+   - **Request Body**:
+     ```json
+     {
+       "file_path": "string",
+       "is_url": boolean
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "status": "success",
+       "message": "string"
+     }
+     ```
 
 2. **Get Subgraph** (`POST /get-subgraph`):
-   - Retrieves a relevant subgraph from the existing knowledge graph based on a query
+   - **Request Body**:
+     ```json
+     {
+       "query": "string"
+     }
+     ```
+   - **Response**:
+     ```json
+     [
+       {
+         "subject": "string",
+         "relation": "string",
+         "object": "string"
+       }
+     ]
+     ```
 
 3. **Create and Query** (`POST /create-and-query`):
-   - Creates a knowledge graph and immediately queries it
+   - **Request Body**:
+     ```json
+     {
+       "file_path": "string",
+       "is_url": boolean,
+       "query": "string"
+     }
+     ```
+   - **Response**:
+     ```json
+     {
+       "subgraph": [
+         {
+           "subject": "string",
+           "relation": "string",
+           "object": "string"
+         }
+       ]
+     }
+     ```
 
 ## Customization
 
