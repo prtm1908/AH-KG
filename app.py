@@ -489,6 +489,110 @@ async def create_knowledge_graph(input_data: FileInput):
                 raise HTTPException(status_code=500, detail=error_msg)
         
         print("Successfully completed all batches")
+
+        # Create and rebuild indices after all batches are processed (only for Nebula)
+        if db_type in ['nebula', 'both'] and nebula_session is not None:
+            print("Creating and rebuilding indices for Nebula Graph...")
+            try:
+                # Helper function to retry an operation until it succeeds or timeout is reached
+                def retry_operation(operation_func, operation_name, max_timeout=100):
+                    start_time = time.time()
+                    attempt = 1
+                    
+                    while time.time() - start_time < max_timeout:
+                        print(f"Attempt {attempt} for {operation_name}...")
+                        success, result = operation_func()
+                        
+                        if success:
+                            print(f"Successfully completed {operation_name} on attempt {attempt}")
+                            return True, result
+                        
+                        # If we get here, the operation failed
+                        elapsed = time.time() - start_time
+                        remaining = max_timeout - elapsed
+                        
+                        if remaining > 0:
+                            sleep_time = min(1, remaining)
+                            print(f"Operation {operation_name} failed: {result}. Retrying in {sleep_time:.1f} seconds...")
+                            time.sleep(sleep_time)
+                        else:
+                            print(f"Operation {operation_name} failed after {elapsed:.1f} seconds: {result}")
+                            return False, result
+                        
+                        attempt += 1
+                    
+                    print(f"Operation {operation_name} timed out after {max_timeout} seconds")
+                    return False, f"Operation timed out after {max_timeout} seconds"
+
+                # Create and rebuild index for NOUN tag name property
+                print("Creating index for NOUN tag name property...")
+                def create_index():
+                    create_index_query = "CREATE TAG INDEX IF NOT EXISTS noun_name_index ON NOUN(name(20))"
+                    resp = nebula_session.execute(create_index_query)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(create_index, "creating index for NOUN tag name property")
+                if not success:
+                    print(f"Failed to create index for NOUN tag name property after multiple attempts: {result}")
+                    # Try with VER_ prefix for the tag
+                    print(f"Trying with VER_ prefix for index creation...")
+                    def create_index_with_prefix():
+                        create_index_query = "CREATE TAG INDEX IF NOT EXISTS noun_name_index ON VER_NOUN(name(20))"
+                        resp = nebula_session.execute(create_index_query)
+                        return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                    
+                    success, result = retry_operation(create_index_with_prefix, "creating index for VER_NOUN tag name property")
+                    if not success:
+                        print(f"Failed to create index for VER_NOUN tag name property after multiple attempts: {result}")
+                
+                # Rebuild the index
+                print("Rebuilding index for NOUN tag name property...")
+                def rebuild_index():
+                    rebuild_index_query = "REBUILD TAG INDEX noun_name_index"
+                    resp = nebula_session.execute(rebuild_index_query)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(rebuild_index, "rebuilding index for NOUN tag name property")
+                if not success:
+                    print(f"Failed to rebuild index for NOUN tag name property after multiple attempts: {result}")
+                
+                # Create and rebuild index for VERB edge name property
+                print("Creating index for VERB edge name property...")
+                def create_verb_index():
+                    create_verb_index_query = "CREATE EDGE INDEX IF NOT EXISTS verb_name_index ON VERB(name(20))"
+                    resp = nebula_session.execute(create_verb_index_query)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(create_verb_index, "creating index for VERB edge name property")
+                if not success:
+                    print(f"Failed to create index for VERB edge name property after multiple attempts: {result}")
+                    # Try with REL_ prefix for the edge
+                    print(f"Trying with REL_ prefix for index creation...")
+                    def create_verb_index_with_prefix():
+                        create_verb_index_query = "CREATE EDGE INDEX IF NOT EXISTS verb_name_index ON REL_VERB(name(20))"
+                        resp = nebula_session.execute(create_verb_index_query)
+                        return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                    
+                    success, result = retry_operation(create_verb_index_with_prefix, "creating index for REL_VERB edge name property")
+                    if not success:
+                        print(f"Failed to create index for REL_VERB edge name property after multiple attempts: {result}")
+                
+                # Rebuild the VERB index
+                print("Rebuilding index for VERB edge name property...")
+                def rebuild_verb_index():
+                    rebuild_verb_index_query = "REBUILD EDGE INDEX verb_name_index"
+                    resp = nebula_session.execute(rebuild_verb_index_query)
+                    return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+                
+                success, result = retry_operation(rebuild_verb_index, "rebuilding index for VERB edge name property")
+                if not success:
+                    print(f"Failed to rebuild index for VERB edge name property after multiple attempts: {result}")
+
+                print("Successfully created and rebuilt all indices")
+            except Exception as e:
+                print(f"Warning: Error creating/rebuilding indices: {str(e)}")
+                # Don't raise an exception here as the data is already uploaded
+
         return {
             "status": "success",
             "message": f"Successfully processed {len(batches)} batches of text and uploaded to graph database"
