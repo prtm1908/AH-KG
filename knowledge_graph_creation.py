@@ -198,8 +198,10 @@ def create_triplets_stanford_corenlp(text):
                         if governor_pos.startswith('NN') or governor_pos.startswith('VB'):
                             # Add the adjective as metadata to the noun or verb
                             if governor_word not in metadata:
-                                metadata[governor_word] = {'adjectives': [], 'adverbs': []}
-                            metadata[governor_word]['adjectives'].append(adj_word)
+                                metadata[governor_word] = {'adjective': "", 'adverb': ""}
+                            # Only set if not already set (keep first one)
+                            if not metadata[governor_word]['adjective']:
+                                metadata[governor_word]['adjective'] = adj_word
             
             for adv in adverbs:
                 adv_word, adv_idx = adv
@@ -213,10 +215,11 @@ def create_triplets_stanford_corenlp(text):
                         if governor_pos.startswith('NN') or governor_pos.startswith('VB'):
                             # Add the adverb as metadata to the noun or verb
                             if governor_word not in metadata:
-                                metadata[governor_word] = {'adjectives': [], 'adverbs': []}
-                            metadata[governor_word]['adverbs'].append(adv_word)
+                                metadata[governor_word] = {'adjective': "", 'adverb': ""}
+                            # Only set if not already set (keep first one)
+                            if not metadata[governor_word]['adverb']:
+                                metadata[governor_word]['adverb'] = adv_word
             
-            # Process nouns and verbs to find those that depend on adjectives or adverbs
             for noun in nouns:
                 noun_word, noun_idx = noun
                 if noun_idx in token_deps:
@@ -229,12 +232,15 @@ def create_triplets_stanford_corenlp(text):
                         if governor_pos.startswith('JJ') or governor_pos.startswith('RB'):
                             # Add the adjective or adverb as metadata to the noun
                             if noun_word not in metadata:
-                                metadata[noun_word] = {'adjectives': [], 'adverbs': []}
+                                metadata[noun_word] = {'adjective': "", 'adverb': ""}
                             
+                            # Only set if not already set (keep first one)
                             if governor_pos.startswith('JJ'):
-                                metadata[noun_word]['adjectives'].append(governor_word)
+                                if not metadata[noun_word]['adjective']:
+                                    metadata[noun_word]['adjective'] = governor_word
                             else:  # RB
-                                metadata[noun_word]['adverbs'].append(governor_word)
+                                if not metadata[noun_word]['adverb']:
+                                    metadata[noun_word]['adverb'] = governor_word
             
             for verb in verbs:
                 verb_word, verb_idx = verb
@@ -248,12 +254,15 @@ def create_triplets_stanford_corenlp(text):
                         if governor_pos.startswith('JJ') or governor_pos.startswith('RB'):
                             # Add the adjective or adverb as metadata to the verb
                             if verb_word not in metadata:
-                                metadata[verb_word] = {'adjectives': [], 'adverbs': []}
+                                metadata[verb_word] = {'adjective': "", 'adverb': ""}
                             
+                            # Only set if not already set (keep first one)
                             if governor_pos.startswith('JJ'):
-                                metadata[verb_word]['adjectives'].append(governor_word)
+                                if not metadata[verb_word]['adjective']:
+                                    metadata[verb_word]['adjective'] = governor_word
                             else:  # RB
-                                metadata[verb_word]['adverbs'].append(governor_word)
+                                if not metadata[verb_word]['adverb']:
+                                    metadata[verb_word]['adverb'] = governor_word
             
             # If we have at least 2 nouns and 1 verb, create triplets
             if len(nouns) >= 2 and len(verbs) >= 1:
@@ -371,24 +380,24 @@ def upload_to_neo4j(triplets: List[Dict[str, str]], relation_tracking: Dict[str,
                 subject_adverbs = []
                 if 'first_node_metadata' in triplet:
                     metadata = triplet['first_node_metadata']
-                    subject_adjectives = metadata.get('adjectives', [])
-                    subject_adverbs = metadata.get('adverbs', [])
+                    subject_adjectives = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                    subject_adverbs = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
                 
                 # Prepare metadata for object (second node)
                 object_adjectives = []
                 object_adverbs = []
                 if 'second_node_metadata' in triplet:
                     metadata = triplet['second_node_metadata']
-                    object_adjectives = metadata.get('adjectives', [])
-                    object_adverbs = metadata.get('adverbs', [])
+                    object_adjectives = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                    object_adverbs = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
                 
                 # Prepare metadata for relation (verb)
                 relation_adjectives = []
                 relation_adverbs = []
                 if 'relation_metadata' in triplet:
                     metadata = triplet['relation_metadata']
-                    relation_adjectives = metadata.get('adjectives', [])
-                    relation_adverbs = metadata.get('adverbs', [])
+                    relation_adjectives = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                    relation_adverbs = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
                 
                 cypher_query = f"""
                 MERGE (s:{subject_label} {{name: $subject}})
@@ -566,13 +575,13 @@ def create_nebula_schema(session=None, connection_pool=None):
         
         # Create NOUN tag
         def create_noun_tag():
-            query = "CREATE TAG IF NOT EXISTS NOUN (name string, text string, caption string, displayName string, title string, adjectives list<string>, adverbs list<string>)"
+            query = "CREATE TAG IF NOT EXISTS NOUN (name string, text string, caption string, displayName string, title string, adjective string, adverb string)"
             result = session.execute(query)
             
             if not result.is_succeeded():
                 # Add prefix for any error, not just syntax errors
                 print(f"Trying with VER_ prefix for tag NOUN...")
-                query_with_prefix = "CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string, adjectives list<string>, adverbs list<string>)"
+                query_with_prefix = "CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string, adjective string, adverb string)"
                 result_with_prefix = session.execute(query_with_prefix)
                 if result_with_prefix.is_succeeded():
                     return True, result_with_prefix
@@ -588,7 +597,7 @@ def create_nebula_schema(session=None, connection_pool=None):
         else:
             print(f"Failed to create NOUN tag after multiple attempts: {result}")
             # Try with prefix
-            success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string, adjectives list<string>, adverbs list<string>)"), "creating VER_NOUN tag")
+            success, result = retry_operation(lambda: session.execute("CREATE TAG IF NOT EXISTS VER_NOUN (name string, text string, caption string, displayName string, title string, adjective string, adverb string)"), "creating VER_NOUN tag")
             if success:
                 noun_tag = "VER_NOUN"
                 print("Waiting 30 seconds for VER_NOUN tag to be fully propagated...")
@@ -599,13 +608,13 @@ def create_nebula_schema(session=None, connection_pool=None):
         
         # Create VERB edge
         def create_verb_edge():
-            query = "CREATE EDGE IF NOT EXISTS VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"
+            query = "CREATE EDGE IF NOT EXISTS VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
             result = session.execute(query)
             
             if not result.is_succeeded():
                 # Add prefix for any error, not just syntax errors
                 print(f"Trying with REL_ prefix for edge VERB...")
-                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"
+                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
                 result_with_prefix = session.execute(query_with_prefix)
                 if result_with_prefix.is_succeeded():
                     return True, result_with_prefix
@@ -621,7 +630,7 @@ def create_nebula_schema(session=None, connection_pool=None):
         else:
             print(f"Failed to create VERB edge after multiple attempts: {result}")
             # Try with prefix
-            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"), "creating REL_VERB edge")
+            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_VERB (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"), "creating REL_VERB edge")
             if success:
                 verb_edge = "REL_VERB"
                 print("Waiting 30 seconds for REL_VERB edge to be fully propagated...")
@@ -632,13 +641,13 @@ def create_nebula_schema(session=None, connection_pool=None):
         
         # Create ADJECTIVE edge
         def create_adjective_edge():
-            query = "CREATE EDGE IF NOT EXISTS ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"
+            query = "CREATE EDGE IF NOT EXISTS ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
             result = session.execute(query)
             
             if not result.is_succeeded():
                 # Add prefix for any error, not just syntax errors
                 print(f"Trying with REL_ prefix for edge ADJECTIVE...")
-                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"
+                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
                 result_with_prefix = session.execute(query_with_prefix)
                 if result_with_prefix.is_succeeded():
                     return True, result_with_prefix
@@ -654,7 +663,7 @@ def create_nebula_schema(session=None, connection_pool=None):
         else:
             print(f"Failed to create ADJECTIVE edge after multiple attempts: {result}")
             # Try with prefix
-            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjectives list<string>, adverbs list<string>)"), "creating REL_ADJECTIVE edge")
+            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"), "creating REL_ADJECTIVE edge")
             if success:
                 adjective_edge = "REL_ADJECTIVE"
                 print("Waiting 30 seconds for REL_ADJECTIVE edge to be fully propagated...")
@@ -780,7 +789,6 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             return False, f"Operation timed out after {max_timeout} seconds"
         
         # Process each triplet
-        import hashlib
         for triplet in triplets:
             sub_name = triplet['first_node']
             obj_name = triplet['second_node']
@@ -803,28 +811,28 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             pos_tag = original_forms[0][1] if original_forms else rel_type
             
             # Get metadata for subject (first node)
-            subject_adjectives = []
-            subject_adverbs = []
+            subject_adjective = ""
+            subject_adverb = ""
             if 'first_node_metadata' in triplet:
                 metadata = triplet['first_node_metadata']
-                subject_adjectives = metadata.get('adjectives', [])
-                subject_adverbs = metadata.get('adverbs', [])
+                subject_adjective = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                subject_adverb = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
             
             # Get metadata for object (second node)
-            object_adjectives = []
-            object_adverbs = []
+            object_adjective = ""
+            object_adverb = ""
             if 'second_node_metadata' in triplet:
                 metadata = triplet['second_node_metadata']
-                object_adjectives = metadata.get('adjectives', [])
-                object_adverbs = metadata.get('adverbs', [])
+                object_adjective = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                object_adverb = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
             
             # Get metadata for relation (verb)
-            relation_adjectives = []
-            relation_adverbs = []
+            relation_adjective = ""
+            relation_adverb = ""
             if 'relation_metadata' in triplet:
                 metadata = triplet['relation_metadata']
-                relation_adjectives = metadata.get('adjectives', [])
-                relation_adverbs = metadata.get('adverbs', [])
+                relation_adjective = metadata.get('adjective', "") or metadata.get('adjectives', [""])[0]
+                relation_adverb = metadata.get('adverb', "") or metadata.get('adverbs', [""])[0]
             
             sub_id = f"v_{int(hashlib.sha256(sub_name.encode()).hexdigest()[:8], 16) % 1000000}"
             obj_id = f"v_{int(hashlib.sha256(obj_name.encode()).hexdigest()[:8], 16) % 1000000}"
@@ -832,7 +840,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             # Insert subject vertex
             def insert_subject_vertex():
                 insert_subject = (
-                    f'INSERT VERTEX {sub_label} (name, text, caption, displayName, title, adjectives, adverbs) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", {json.dumps(subject_adjectives)}, {json.dumps(subject_adverbs)})'
+                    f'INSERT VERTEX {sub_label} (name, text, caption, displayName, title, adjective, adverb) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{subject_adjective}", "{subject_adverb}")'
                 )
                 resp = session.execute(insert_subject)
                 return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -844,7 +852,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 print(f"Trying with VER_ prefix for subject vertex {sub_id}...")
                 def insert_subject_vertex_with_prefix():
                     insert_subject = (
-                        f'INSERT VERTEX VER_{sub_label} (name, text, caption, displayName, title, adjectives, adverbs) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", {json.dumps(subject_adjectives)}, {json.dumps(subject_adverbs)})'
+                        f'INSERT VERTEX VER_{sub_label} (name, text, caption, displayName, title, adjective, adverb) VALUES "{sub_id}":("{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{sub_name}", "{subject_adjective}", "{subject_adverb}")'
                     )
                     resp = session.execute(insert_subject)
                     return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -856,7 +864,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             # Insert object vertex
             def insert_object_vertex():
                 insert_object = (
-                    f'INSERT VERTEX {obj_label} (name, text, caption, displayName, title, adjectives, adverbs) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", {json.dumps(object_adjectives)}, {json.dumps(object_adverbs)})'
+                    f'INSERT VERTEX {obj_label} (name, text, caption, displayName, title, adjective, adverb) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{object_adjective}", "{object_adverb}")'
                 )
                 resp = session.execute(insert_object)
                 return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -868,7 +876,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 print(f"Trying with VER_ prefix for object vertex {obj_id}...")
                 def insert_object_vertex_with_prefix():
                     insert_object = (
-                        f'INSERT VERTEX VER_{obj_label} (name, text, caption, displayName, title, adjectives, adverbs) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", {json.dumps(object_adjectives)}, {json.dumps(object_adverbs)})'
+                        f'INSERT VERTEX VER_{obj_label} (name, text, caption, displayName, title, adjective, adverb) VALUES "{obj_id}":("{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{obj_name}", "{object_adjective}", "{object_adverb}")'
                     )
                     resp = session.execute(insert_object)
                     return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -880,7 +888,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             # Insert edge
             def insert_edge():
                 insert_edge = (
-                    f'INSERT EDGE {edge_type} (type, name, caption, original_form, pos_tag, strength, adjectives, adverbs) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0, {json.dumps(relation_adjectives)}, {json.dumps(relation_adverbs)})'
+                    f'INSERT EDGE {edge_type} (type, name, caption, original_form, pos_tag, strength, adjective, adverb) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0, "{relation_adjective}", "{relation_adverb}")'
                 )
                 resp = session.execute(insert_edge)
                 return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
@@ -892,7 +900,7 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                 print(f"Trying with REL_ prefix for edge from {sub_id} to {obj_id}...")
                 def insert_edge_with_prefix():
                     insert_edge = (
-                        f'INSERT EDGE REL_{edge_type} (type, name, caption, original_form, pos_tag, strength, adjectives, adverbs) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0, {json.dumps(relation_adjectives)}, {json.dumps(relation_adverbs)})'
+                        f'INSERT EDGE REL_{edge_type} (type, name, caption, original_form, pos_tag, strength, adjective, adverb) VALUES "{sub_id}" -> "{obj_id}":("{rel}", "{rel}", "{rel}", "{original_form}", "{pos_tag}", 1.0, "{relation_adjective}", "{relation_adverb}")'
                     )
                     resp = session.execute(insert_edge)
                     return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None

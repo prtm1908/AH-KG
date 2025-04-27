@@ -9,10 +9,13 @@ import os
 import torch
 from nebula3.gclient.net import ConnectionPool
 from nebula3.Config import Config
+import requests
+import json
 
 def process_query(query: str) -> Tuple[List[str], List[str]]:
     """
     Process a query to identify nouns and verbs, including coreference resolution.
+    First resolves coreferences using spaCy and FastCoref, then extracts nouns and verbs using Stanford CoreNLP.
     
     Args:
         query: Input query string
@@ -21,11 +24,12 @@ def process_query(query: str) -> Tuple[List[str], List[str]]:
         Tuple containing lists of nouns and verbs found in the query
     """
     print("\nStarting process_query")
-    # Load English language model with minimal components
-    print("Loading spaCy model...")
+    
+    # First resolve coreferences using spaCy and FastCoref
+    print("Loading spaCy model for coreference resolution...")
     nlp = spacy.load("en_core_web_sm", exclude=["parser", "lemmatizer", "ner", "textcat"])
     
-    # Try with CUDA first
+    # Try with CUDA first for FastCoref
     try:
         print("Checking CUDA availability...")
         if torch.cuda.is_available() and torch.cuda.is_initialized():
@@ -57,7 +61,17 @@ def process_query(query: str) -> Tuple[List[str], List[str]]:
         print("Retrying with CPU...")
         
         # Update FastCoref config to use CPU
-        nlp.get_pipe("fastcoref").config['device'] = 'cpu'
+        if "fastcoref" in nlp.pipe_names:
+            nlp.remove_pipe("fastcoref")
+        
+        nlp.add_pipe(
+            "fastcoref", 
+            config={
+                'model_architecture': 'LingMessCoref',
+                'model_path': 'biu-nlp/lingmess-coref',
+                'device': 'cpu'
+            }
+        )
         
         # Process the query with coreference resolution using CPU
         print("Processing query with CPU...")
@@ -67,18 +81,67 @@ def process_query(query: str) -> Tuple[List[str], List[str]]:
     # Get the resolved text
     print("Getting resolved text...")
     resolved_text = doc._.resolved_text
+    print(f"Resolved text: {resolved_text}")
     
-    # Process the resolved text
-    print("Processing resolved text...")
-    doc = nlp(resolved_text)
+    # Now process with Stanford CoreNLP to extract nouns and verbs
+    print("Sending resolved text to Stanford CoreNLP...")
     
-    # Extract nouns and verbs
-    nouns = [token.text for token in doc if token.pos_ == "NOUN"]
-    verbs = [token.text for token in doc if token.pos_ == "VERB"]
+    # Stanford CoreNLP server URL
+    corenlp_url = "http://localhost:9000"
     
-    print(f"Found {len(nouns)} nouns and {len(verbs)} verbs")
-    print(f"Nouns: {nouns}")
-    return nouns, verbs
+    # Prepare the request with dependency parsing
+    properties = {
+        "annotators": "tokenize,ssplit,pos,lemma,depparse",
+        "outputFormat": "json"
+    }
+    
+    # Send the request to Stanford CoreNLP
+    try:
+        response = requests.post(
+            f"{corenlp_url}/?properties={json.dumps(properties)}",
+            data=resolved_text.encode('utf-8'),
+            headers={'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'}
+        )
+        
+        if response.status_code != 200:
+            print(f"Error from Stanford CoreNLP: {response.status_code}")
+            print(f"Response: {response.text}")
+            return [], []
+            
+        # Parse the response
+        result = response.json()
+        
+        nouns = set()
+        verbs = set()
+        
+        # Process each sentence
+        for sentence in result.get('sentences', []):
+            tokens = sentence.get('tokens', [])
+            
+            # Extract nouns and verbs based on POS tags
+            for token in tokens:
+                pos = token.get('pos', '')
+                word = token.get('word', '')
+                
+                # Stanford CoreNLP POS tags:
+                # NN, NNS, NNP, NNPS for nouns
+                # VB, VBD, VBG, VBN, VBP, VBZ for verbs
+                if pos.startswith('NN'):
+                    nouns.add(word)
+                elif pos.startswith('VB'):
+                    verbs.add(word)
+        
+        nouns_list = list(nouns)
+        verbs_list = list(verbs)
+        
+        print(f"Found {len(nouns_list)} nouns and {len(verbs_list)} verbs")
+        print(f"Nouns: {nouns_list}")
+        print(f"Verbs: {verbs_list}")
+        return nouns_list, verbs_list
+        
+    except Exception as e:
+        print(f"Error processing with Stanford CoreNLP: {str(e)}")
+        return [], []
 
 def lemmatize_relations(verbs: List[str]) -> Dict[str, List[str]]:
     """
