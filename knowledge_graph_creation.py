@@ -174,13 +174,13 @@ def create_triplets_stanford_corenlp(text):
                 # JJ, JJR, JJS for adjectives
                 # RB, RBR, RBS for adverbs
                 if pos.startswith('NN'):
-                    nouns.append((word, idx))
+                    nouns.append((word.lower(), idx))
                 elif pos.startswith('VB'):
-                    verbs.append((word, idx))
+                    verbs.append((word.lower(), idx))
                 elif pos.startswith('JJ'):
-                    adjectives.append((word, idx))
+                    adjectives.append((word.lower(), idx))
                 elif pos.startswith('RB'):
-                    adverbs.append((word, idx))
+                    adverbs.append((word.lower(), idx))
             
             # Create a dictionary to store metadata for nouns and verbs
             metadata = {}
@@ -313,20 +313,20 @@ def process_triplets_with_lemmatization(triplets: List[Dict[str, str]]) -> Tuple
     processed_triplets = []
     for triplet in triplets:
         processed_triplet = {
-            'first_node': triplet['first_node'],
-            'second_node': triplet['second_node']
+            'first_node': triplet['first_node'].lower(),
+            'second_node': triplet['second_node'].lower()
         }
         
         # Process the relation with lemmatization
-        relation_doc = nlp(triplet['relation'])
+        relation_doc = nlp(triplet['relation'].lower())
         if len(relation_doc) > 0:
             lemmatized_relation = relation_doc[0].lemma_
             processed_triplet['relation'] = lemmatized_relation
             relation_tracking[lemmatized_relation].append(
-                (triplet['relation'], relation_doc[0].pos_)
+                (triplet['relation'].lower(), relation_doc[0].pos_)
             )
         else:
-            processed_triplet['relation'] = triplet['relation']
+            processed_triplet['relation'] = triplet['relation'].lower()
         
         # Copy metadata fields if they exist
         if 'first_node_metadata' in triplet:
@@ -481,7 +481,7 @@ def sanitize_edge(name: str) -> str:
 
 def create_nebula_schema(session=None, connection_pool=None):
     """
-    Create the NOUN tag and VERB/ADJECTIVE edges in Nebula Graph.
+    Create the NOUN tag and VERB edges in Nebula Graph.
     This function should be called once before processing any batches.
     
     Args:
@@ -489,7 +489,7 @@ def create_nebula_schema(session=None, connection_pool=None):
         connection_pool: Optional connection pool to reuse (if None, a new pool will be created)
         
     Returns:
-        Tuple of (noun_tag, verb_edge, adjective_edge) that were created
+        Tuple of (noun_tag, verb_edge) that were created
     """
     # Load environment variables with override=True to force reload
     load_dotenv(override=True)
@@ -639,39 +639,6 @@ def create_nebula_schema(session=None, connection_pool=None):
                 print(f"Failed to create REL_VERB edge after multiple attempts: {result}")
                 raise Exception("Failed to create VERB edge")
         
-        # Create ADJECTIVE edge
-        def create_adjective_edge():
-            query = "CREATE EDGE IF NOT EXISTS ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
-            result = session.execute(query)
-            
-            if not result.is_succeeded():
-                # Add prefix for any error, not just syntax errors
-                print(f"Trying with REL_ prefix for edge ADJECTIVE...")
-                query_with_prefix = "CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"
-                result_with_prefix = session.execute(query_with_prefix)
-                if result_with_prefix.is_succeeded():
-                    return True, result_with_prefix
-                return False, result_with_prefix.error_msg()
-            
-            return True, result
-        
-        success, result = retry_operation(create_adjective_edge, "creating ADJECTIVE edge")
-        if success:
-            adjective_edge = "ADJECTIVE"
-            print("Waiting 30 seconds for ADJECTIVE edge to be fully propagated...")
-            time.sleep(30)
-        else:
-            print(f"Failed to create ADJECTIVE edge after multiple attempts: {result}")
-            # Try with prefix
-            success, result = retry_operation(lambda: session.execute("CREATE EDGE IF NOT EXISTS REL_ADJECTIVE (type string, name string, caption string, original_form string, pos_tag string, strength double, adjective string, adverb string)"), "creating REL_ADJECTIVE edge")
-            if success:
-                adjective_edge = "REL_ADJECTIVE"
-                print("Waiting 30 seconds for REL_ADJECTIVE edge to be fully propagated...")
-                time.sleep(30)
-            else:
-                print(f"Failed to create REL_ADJECTIVE edge after multiple attempts: {result}")
-                raise Exception("Failed to create ADJECTIVE edge")
-        
         print("Successfully created Nebula Graph schema")
         
         # Only release and close if we created the session and connection pool
@@ -679,7 +646,7 @@ def create_nebula_schema(session=None, connection_pool=None):
             session.release()
             connection_pool.close()
         
-        return noun_tag, verb_edge, adjective_edge
+        return noun_tag, verb_edge
     
     except Exception as e:
         print(f"create_nebula_schema error: {str(e)}")
@@ -744,7 +711,6 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
         # These should have been created by create_nebula_schema before this function is called
         noun_tag = "NOUN"
         verb_edge = "VERB"
-        adjective_edge = "ADJECTIVE"
         
         # Helper function to retry an operation until it succeeds or timeout is reached
         def retry_operation(operation_func, operation_name, max_timeout=100):
@@ -793,22 +759,16 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
             sub_name = triplet['first_node']
             obj_name = triplet['second_node']
             rel = triplet['relation']
-            rel_type = triplet.get('relation_type', 'VERB')  # Default to VERB if not specified
             
             # Sanitize names
             sub_label = noun_tag  # Use NOUN tag for all vertices
             obj_label = noun_tag  # Use NOUN tag for all vertices
-            
-            # Determine which edge type to use based on the relation_type
-            if rel_type == 'ADJECTIVE':
-                edge_type = adjective_edge
-            else:
-                edge_type = verb_edge
+            edge_type = verb_edge  # Always use VERB edge type
             
             # Insert vertices and edge
             original_forms = relation_tracking.get(rel, [])
             original_form = original_forms[0][0] if original_forms else rel
-            pos_tag = original_forms[0][1] if original_forms else rel_type
+            pos_tag = original_forms[0][1] if original_forms else 'VERB'
             
             # Get metadata for subject (first node)
             subject_adjective = ""
@@ -910,6 +870,70 @@ def upload_to_nebula(triplets: list, relation_tracking: dict, session=None, conn
                     print(f"Failed to insert edge from {sub_id} to {obj_id} with REL_ prefix after multiple attempts: {result}")
         
         print("Successfully uploaded triplets to Nebula Graph.")
+        
+        # Create and rebuild index for NOUN tag name property
+        print("Creating index for NOUN tag name property...")
+        def create_index():
+            create_index_query = "CREATE TAG INDEX IF NOT EXISTS noun_name_index ON NOUN(name(20))"
+            resp = session.execute(create_index_query)
+            return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+        
+        success, result = retry_operation(create_index, "creating index for NOUN tag name property")
+        if not success:
+            print(f"Failed to create index for NOUN tag name property after multiple attempts: {result}")
+            # Try with VER_ prefix for the tag
+            print(f"Trying with VER_ prefix for index creation...")
+            def create_index_with_prefix():
+                create_index_query = "CREATE TAG INDEX IF NOT EXISTS noun_name_index ON VER_NOUN(name(20))"
+                resp = session.execute(create_index_query)
+                return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+            
+            success, result = retry_operation(create_index_with_prefix, "creating index for VER_NOUN tag name property")
+            if not success:
+                print(f"Failed to create index for VER_NOUN tag name property after multiple attempts: {result}")
+        
+        # Rebuild the index
+        print("Rebuilding index for NOUN tag name property...")
+        def rebuild_index():
+            rebuild_index_query = "REBUILD TAG INDEX noun_name_index"
+            resp = session.execute(rebuild_index_query)
+            return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+        
+        success, result = retry_operation(rebuild_index, "rebuilding index for NOUN tag name property")
+        if not success:
+            print(f"Failed to rebuild index for NOUN tag name property after multiple attempts: {result}")
+        
+        # Create and rebuild index for VERB edge name property
+        print("Creating index for VERB edge name property...")
+        def create_verb_index():
+            create_verb_index_query = "CREATE EDGE INDEX IF NOT EXISTS verb_name_index ON VERB(name(20))"
+            resp = session.execute(create_verb_index_query)
+            return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+        
+        success, result = retry_operation(create_verb_index, "creating index for VERB edge name property")
+        if not success:
+            print(f"Failed to create index for VERB edge name property after multiple attempts: {result}")
+            # Try with REL_ prefix for the edge
+            print(f"Trying with REL_ prefix for index creation...")
+            def create_verb_index_with_prefix():
+                create_verb_index_query = "CREATE EDGE INDEX IF NOT EXISTS verb_name_index ON REL_VERB(name(20))"
+                resp = session.execute(create_verb_index_query)
+                return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+            
+            success, result = retry_operation(create_verb_index_with_prefix, "creating index for REL_VERB edge name property")
+            if not success:
+                print(f"Failed to create index for REL_VERB edge name property after multiple attempts: {result}")
+        
+        # Rebuild the VERB index
+        print("Rebuilding index for VERB edge name property...")
+        def rebuild_verb_index():
+            rebuild_verb_index_query = "REBUILD EDGE INDEX verb_name_index"
+            resp = session.execute(rebuild_verb_index_query)
+            return resp.is_succeeded(), resp.error_msg() if not resp.is_succeeded() else None
+        
+        success, result = retry_operation(rebuild_verb_index, "rebuilding index for VERB edge name property")
+        if not success:
+            print(f"Failed to rebuild index for VERB edge name property after multiple attempts: {result}")
         
         # Only release and close if we created the session and connection pool
         if should_close:
