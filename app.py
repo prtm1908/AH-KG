@@ -384,32 +384,37 @@ async def create_knowledge_graph(input_data: FileInput):
     """
     # Define db_type at the beginning of the function to avoid UnboundLocalError
     db_type = os.getenv('DB_TYPE', 'neo4j').lower()
+    print(f"Database type: {db_type}")  # Add explicit logging
     
     # Declare global variables
     global nebula_connection_pool, nebula_session
     
     try:
         print("Starting create_knowledge_graph function")
+        
         # Clear the existing database first
         print("Clearing graph database...")
         try:
             clear_graph_database()
             print("Successfully cleared graph database")
+            
+            # Create Nebula schema immediately after clearing if using Nebula
+            if db_type in ['nebula', 'both']:
+                print(f"DB type is {db_type}, creating Nebula Graph schema...")
+                try:
+                    create_nebula_schema(nebula_session, nebula_connection_pool)
+                    print("Successfully created Nebula Graph schema")
+                except Exception as e:
+                    error_msg = f"Error creating Nebula Graph schema: {str(e)}"
+                    print(error_msg)
+                    raise HTTPException(status_code=500, detail=error_msg)
+            else:
+                print(f"Skipping Nebula schema creation for db_type: {db_type}")
+                
         except Exception as e:
             error_msg = f"Error clearing graph database: {str(e)}"
             print(error_msg)
             raise HTTPException(status_code=500, detail=error_msg)
-        
-        # Create Nebula schema if using Nebula
-        if db_type in ['nebula', 'both']:
-            try:
-                print("Creating Nebula Graph schema...")
-                create_nebula_schema(nebula_session, nebula_connection_pool)
-                print("Successfully created Nebula Graph schema")
-            except Exception as e:
-                error_msg = f"Error creating Nebula Graph schema: {str(e)}"
-                print(error_msg)
-                raise HTTPException(status_code=500, detail=error_msg)
         
         # Read text from file
         print(f"Reading text from {'URL' if input_data.is_url else 'file'}: {input_data.file_path}")
@@ -438,16 +443,6 @@ async def create_knowledge_graph(input_data: FileInput):
                     print(f"Warning: Error establishing Nebula connection: {str(e)}, will create new connections for each batch")
             else:
                 print("Using existing Nebula Graph connection from clear_graph_database")
-            
-            # Create Nebula schema once before processing batches
-            try:
-                print("Creating Nebula Graph schema...")
-                create_nebula_schema(nebula_session, nebula_connection_pool)
-                print("Successfully created Nebula Graph schema")
-            except Exception as e:
-                error_msg = f"Error creating Nebula Graph schema: {str(e)}"
-                print(error_msg)
-                raise HTTPException(status_code=500, detail=error_msg)
         
         # Process each batch
         for i, batch in enumerate(batches, 1):
